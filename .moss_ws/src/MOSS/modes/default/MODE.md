@@ -5,7 +5,9 @@ apps:
   - '*/*'           # 允许的 app 白名单。'*/*' = 全部公开 app
                     #   group/* = 某个 group 下所有 app
                     #   _ 前缀（如 _private/app）= 禁止访问
-bringup_apps: []    # 启动时自动 bringup 的 app 列表
+bringup_apps:       # 启动时自动 bringup 的 app 列表
+  - 'bodies/reachymini'
+  - 'sensors/voice'
 ctml_version: ''    # 留空使用默认 CTML 版本
 description: ''     # 一行描述
 name: 'default'     # mode 名称（与目录名一致）

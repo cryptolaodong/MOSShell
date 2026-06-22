@@ -17,7 +17,7 @@ inject_system_primitives(main, extended=True)
 main.with_module(SpeechChannelModule())
 
 # -- fractal hub ---------------------------------------------
-main.import_channels(matrix_fractal_hub_channel_factory())
+main.import_channels(matrix_fractal_hub_channel_factory(allow_all=True, auto_start=True))
 
 # -- app store ---------------------------------------------
 main.import_channels(AppStoreChannel())

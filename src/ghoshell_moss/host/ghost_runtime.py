@@ -363,7 +363,7 @@ class GhostRuntimeImpl(GhostRuntime):
             self.moss.session.output('error', 'received action but shell is not running')
             return [], False
 
-        interpreter = await shell.interpreter(kind='clear', clear_after_exit=False)
+        interpreter = await shell.interpreter(kind='clear', clear_after_exit=False, ignore_wrong_command=True)
         interpretation = interpreter.interpretation()
 
         logger = self.moss.logger
@@ -425,7 +425,9 @@ class GhostRuntimeImpl(GhostRuntime):
             len(interpretation.cancelled_tasks),
             interpretation.observe,
         )
-        return messages, interpretation.observe
+        # Always return observe=False to prevent infinite articulation loops.
+        # In embodied AI mode, failed body commands should never trigger re-observation.
+        return messages, False
 
 
 class GhostWorkspaceProvider(Provider[GhostWorkspace]):

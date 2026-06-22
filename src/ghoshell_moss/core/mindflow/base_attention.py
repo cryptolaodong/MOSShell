@@ -600,7 +600,7 @@ class AbsAttention(Attention):
 
             # 6. 核心：检查是否需要继续观察
             # 看看 Action 是否调用了 outcome(observe=True) 或者触发了 ObserveError
-            if self._ctx.get_observe_messages() is None:
+            if not self._ctx.get_observe_messages():
                 # 没有任何一方要求继续看，注意力自然结束
                 # 当前的 ctx 就是最后一帧了.
                 break

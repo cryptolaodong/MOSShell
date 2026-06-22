@@ -47,6 +47,7 @@ class GhostREPLState(REPLState):
         self._session.add_input_signal(
             console_input,
             description="from ghost tui",
+            stale_timeout=30.0,
         )
         self.console.hint(f"signal sent: {console_input[:60]}...")
 
