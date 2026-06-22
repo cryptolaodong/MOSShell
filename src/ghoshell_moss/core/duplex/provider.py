@@ -657,6 +657,18 @@ class DuplexChannelProvider(ChannelProvider):
     def _enqueue_command_call(self, call_event: CommandCallEvent) -> None:
         unique_name = Command.make_unique_name(call_event.chan, call_event.name)
         command = self._root_runtime.get_command(unique_name)
+        if not command:
+            # Debug: why command not found?
+            rt = self._root_runtime
+            self.logger.warning(
+                "%s command %r not found. runtime=%s running=%s available=%s tree_running=%s own_commands=%s",
+                self._log_prefix, unique_name,
+                rt.__class__.__name__,
+                rt.is_running(),
+                rt.is_available(),
+                rt.tree.is_running() if hasattr(rt, 'tree') else 'N/A',
+                list(rt.own_commands().keys()) if hasattr(rt, 'own_commands') else 'N/A',
+            )
         if command:
             if not command.is_available():
                 response = call_event.not_available(f"Command {unique_name} not available in provider")

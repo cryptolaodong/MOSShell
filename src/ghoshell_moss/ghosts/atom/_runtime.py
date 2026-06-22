@@ -6,7 +6,7 @@ from ghoshell_moss.contracts.logger import LoggerItf, get_moss_logger
 from ghoshell_moss.message import Message
 from ghoshell_container import IoCContainer
 from pydantic_ai import Agent
-from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse
+from pydantic_ai.messages import ModelMessage, ModelRequest, ModelResponse, ModelMessagesTypeAdapter
 
 if TYPE_CHECKING:
     from ._meta import AtomMeta
@@ -34,6 +34,9 @@ class Atom(Ghost):
         self._logger = container.get(LoggerItf) or get_moss_logger()
         self._history: list[ModelMessage] = []
         self._last_context: dict = {}
+        self._history_file = "ghost_history.json"
+        # Load persisted history from session storage
+        self._load_history()
 
     @property
     def meta(self) -> GhostMeta:
@@ -50,6 +53,29 @@ class Atom(Ghost):
         from ._adapter import moment_to_request
         return moment_to_request(moment)
 
+    def _load_history(self) -> None:
+        """从 session storage 加载对话历史。"""
+        try:
+            from ghoshell_moss.core.blueprint.session import Session
+            session = self._container.get(Session)
+            if session and session.scope_storage.exists(self._history_file):
+                data = session.scope_storage.get(self._history_file)
+                self._history = ModelMessagesTypeAdapter.validate_json(data)
+                self._logger.info("Loaded %d history messages from storage", len(self._history))
+        except Exception as e:
+            self._logger.warning("Failed to load history: %s", e)
+
+    def _save_history(self) -> None:
+        """持久化对话历史到 session storage。"""
+        try:
+            from ghoshell_moss.core.blueprint.session import Session
+            session = self._container.get(Session)
+            if session:
+                data = ModelMessagesTypeAdapter.dump_json(self._history)
+                session.scope_storage.put(self._history_file, data)
+        except Exception as e:
+            self._logger.debug("Failed to save history: %s", e)
+
     def model_history(self) -> list[ModelMessage]:
         """返回当前内存中的对话历史.
 
@@ -63,6 +89,7 @@ class Atom(Ghost):
         """保存本轮交换到内存历史."""
         self._history.append(self.to_model_request(moment))
         self._history.append(response)
+        self._save_history()
 
     # ── 核心循环 ──────────────────────────────────
 
@@ -80,14 +107,27 @@ class Atom(Ghost):
         request = self.to_model_request(moment)
         history = self.model_history()
 
-        async with self._agent.run_stream(
-            user_prompt=request.parts,
-            message_history=history,
-            deps=self._container,
-        ) as stream:
-            async for text in stream.stream_text(delta=True):
-                yield text
-            self.save_model_request(moment, stream.response)
+        try:
+            async with self._agent.run_stream(
+                user_prompt=request.parts,
+                message_history=history,
+                deps=self._container,
+            ) as stream:
+                async for text in stream.stream_text(delta=True):
+                    yield text
+                self.save_model_request(moment, stream.response)
+        except AssertionError as e:
+            # pydantic_ai 1.105.0 bug: TextContent in error retry path
+            self._logger.warning("Atom articulate AssertionError (pydantic_ai bug), retrying without history: %s", e)
+            # Retry once without history to bypass the bug
+            async with self._agent.run_stream(
+                user_prompt=request.parts,
+                message_history=[],
+                deps=self._container,
+            ) as stream:
+                async for text in stream.stream_text(delta=True):
+                    yield text
+                self.save_model_request(moment, stream.response)
 
     # ── 生命周期 ──────────────────────────────────
 

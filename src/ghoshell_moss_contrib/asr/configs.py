@@ -3,14 +3,14 @@ import os
 from typing import Literal, Optional, Dict
 
 import numpy as np
-import pyaudio
+# pyaudio imported lazily
 from ghoshell_common.contracts import LoggerItf
 from ghoshell_moss.contracts import ConfigType
 from pydantic import BaseModel, Field
 from typing_extensions import Self
 
 from ghoshell_moss_contrib.asr.concepts import ListenerStateName
-from ghoshell_moss_contrib.asr.pyaudio_input_impl import PyAudioInput
+# PyAudioInput imported lazily
 from ghoshell_moss_contrib.asr.volcengine_bm_protocol import VolcanoBigModelASRConfig
 
 
@@ -48,13 +48,15 @@ class PyAudioInputConfig(BaseModel):
     def new_audio_input(
             self,
             *,
-            pa: Optional[pyaudio.PyAudio] = None,
+            pa = None,
             logger: Optional[LoggerItf] = None,
             dtype: np.dtype = np.int16,
-    ) -> PyAudioInput:
+    ):
         """
         快速创建一个.
         """
+        import pyaudio
+        from ghoshell_moss_contrib.asr.pyaudio_input_impl import PyAudioInput
         pa = pa or pyaudio.PyAudio()
         conf = self.resolve_env()
         logger = logger or logging.getLogger("PyAudioInput")

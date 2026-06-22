@@ -686,7 +686,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 try:
                     await asyncio.wait_for(
                         self._current_batch.wait_until_done(),
-                        timeout=0.5
+                        timeout=5.0
                     )
                 except asyncio.TimeoutError:
                     self._logger.warning("PTT wait_until_done timed out")

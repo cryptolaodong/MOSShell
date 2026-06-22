@@ -1,8 +1,8 @@
 ---
 arguments: ''
-description: ''
+description: 'Reachy Mini body control via Fractal protocol'
 executable: uv
-respawn: false
+respawn: true
 script: main.py
 workers: 1
 ---

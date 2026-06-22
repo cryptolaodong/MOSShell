@@ -1,12 +1,16 @@
 import asyncio
-import logging
+# 禁用 GStreamer 避免 ReachyMini SDK 加载时 segfault
 import os
+os.environ['GST_PLUGIN_PATH'] = ''
+os.environ['GST_PLUGIN_SYSTEM_PATH'] = ''
+
+import logging
 import threading
 from typing import Optional
 
 import numpy as np
 from dotenv import load_dotenv
-from pynput import keyboard as _keyboard
+# pynput removed - using VAD auto-listen mode
 from rich.console import Console
 from rich.panel import Panel
 
@@ -22,9 +26,7 @@ from ghoshell_moss_contrib.asr.configs import ListenerConfig
 
 load_dotenv()
 
-# 可配置的 PTT 触发键，默认 media_play_pause
-# 取值参考 pynput.keyboard.Key: media_play_pause, f1-f20, ctrl, shift, etc.
-_PTT_KEY_NAME = os.getenv("VOICE_PTT_KEY", "media_play_pause")
+# VAD auto-listen mode - no PTT key needed
 
 # ── ThreadedListenerService (extracted from ConsolePTTChat) ──────────────
 
@@ -169,7 +171,7 @@ class VoiceStatusDisplay:
         self.console.print(f"  [dim]📤 sent to ghost[/dim]")
 
     def show_footer(self):
-        self.console.print(f"[dim]Press {_PTT_KEY_NAME} to talk / Ctrl+C to quit[/dim]")
+        self.console.print("[dim]Auto-listen mode. Speak freely! Ctrl+C to quit[/dim]")
 
 
 # ── Main Entry ────────────────────────────────────────────────────────────
@@ -199,10 +201,15 @@ async def main(matrix: Matrix) -> None:
 
     # 1. Listener config + service
     config = ListenerConfig()
+    # Use local microphone via sounddevice
+    from sd_audio_input import SoundDeviceAudioInput
+    from sd_audio_input import ReachyMicAudioInput
+    sd_input = ReachyMicAudioInput(rate=16000, channels=1)
+
     inner = AsyncListenerServiceImpl(
         config=config,
         logger=logger,
-        audio_input=None,  # use default PyAudio input
+        audio_input=sd_input,
     )
 
     main_loop = asyncio.get_running_loop()
@@ -252,32 +259,31 @@ async def main(matrix: Matrix) -> None:
 
     await threaded.set_callback(VoiceCallback())
 
-    # 3. PTT trigger (pynput keyboard listener)
-    quit_event = asyncio.Event()
-    loop = asyncio.get_running_loop()
-
-    ptt_key = getattr(_keyboard.Key, _PTT_KEY_NAME, None)
-
-    def on_press(key):
-        if ptt_key and key == ptt_key:
-            asyncio.run_coroutine_threadsafe(_toggle_recording(threaded), loop)
-
-    kb_listener = _keyboard.Listener(on_press=on_press, on_release=lambda k: True)
-    kb_listener.start()
-    console.print(f"[green]PTT listener started. Key: {_PTT_KEY_NAME}[/green]")
-
-    display.show_state("idle")
+    # 3. Auto-listen mode (VAD) — 持续监听，不需要按键
+    console.print("[green]Auto-listen mode started (VAD). Speak freely![/green]")
+    display.show_state("listening")
     display.show_footer()
 
-    # 4. Wait for quit
+    # 自动进入监听状态
+    await threaded.set_state(AsyncListenerStateName.PDT_LISTENING.value)
+
+    # 4. 持续循环：监听结束后自动重新开始监听
     try:
-        await quit_event.wait()
+        while True:
+            await asyncio.sleep(0.5)
+            try:
+                current_state = await threaded.current_state()
+                state_name = current_state.name().value
+                # 如果不在监听状态，自动重新开始监听
+                if state_name != AsyncListenerStateName.PDT_LISTENING.value:
+                    await asyncio.sleep(0.3)  # 短暂间隔避免打断
+                    await threaded.set_state(AsyncListenerStateName.PDT_LISTENING.value)
+            except Exception:
+                await asyncio.sleep(1)
     except asyncio.CancelledError:
         pass
     finally:
         console.print("[yellow]Shutting down...[/yellow]")
-        if kb_listener:
-            kb_listener.stop()
         await threaded.shutdown()
         console.print("[green]Voice input app stopped.[/green]")
 

@@ -320,7 +320,9 @@ class AbsMindflow(Mindflow):
         nucleus = self._faculties.get(impulse.source, None)
         if nucleus is not None:
             # 应该要将 impulse 给踢掉.
-            if impulse is nucleus.peek():
+            # 用 id 比较代替 is 比较, 避免 rebuild 导致对象不一致时漏清.
+            peeked = nucleus.peek()
+            if peeked is not None and (impulse is peeked or impulse.id == peeked.id):
                 nucleus.pop_impulse(impulse)
 
     async def _challenge_attention(self, impulse: Impulse) -> None:
@@ -337,12 +339,16 @@ class AbsMindflow(Mindflow):
                     # 同 ID 更新 complete, 不抢占.
                     self._pop_impulse(impulse)
                     self._fire_challenge(impulse, defender, 'absorbed')
+                elif done is None:
+                    # 吸收 (同源更新等), pop 防止重复触发.
+                    self._pop_impulse(impulse)
+                    self._fire_challenge(impulse, defender, 'absorbed')
                 elif done:
                     # 抢占成功, 创建新 Attention.
                     await self._create_attention_from_impulse(impulse)
                     self._fire_challenge(impulse, defender, 'preempted')
                 else:
-                    # 被压制.
+                    # 被压制 (done is False).
                     self._suppress_impulse(impulse, defender)
                     self._fire_challenge(impulse, defender, 'suppressed')
                 return None
@@ -580,6 +586,8 @@ class AbsMindflow(Mindflow):
                         await last_popped_attention.wait_closed()
                         # 不要再次进入这里.
                         last_popped_attention = None
+                        # Cooldown: prevent immediate re-trigger after attention completes
+                        await asyncio.sleep(3.0)
                     # 如果进入等待的瞬间没有任何 attention, 最常见的就是一大堆的 Impulse 被压抑住了.
                     # 而被压抑住的 attention 结束时, 反而没有新的 impulse 进入.
                     if self._current_attention is None or self._current_attention.is_aborted():

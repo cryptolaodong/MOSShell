@@ -210,12 +210,15 @@ class HostAppStore(AppStore):
         修正后的参数构造
         """
         executable, args_list = self._get_app_executable(app, arguments)
+        # Remove VIRTUAL_ENV to avoid uv confusion in app subprocesses
+        clean_env = dict(env)
+        clean_env["VIRTUAL_ENV"] = ""  # Override to prevent uv from using parent venv
         options = {
             "working_dir": app.work_directory,
             "numprocesses": app.watcher.workers,
             "respawn": app.watcher.respawn,
             "max_age": app.watcher.max_age,
-            "env": env,
+            "env": clean_env,
             "singleton": True,
             "copy_env": True,
         }
@@ -374,7 +377,7 @@ class HostAppStore(AppStore):
         self._client = CircusClient(endpoint=self._endpoint, timeout=2.0)
 
         connected = False
-        for _ in range(10):
+        for _ in range(20):
             try:
                 # 使用包装好的异步方法
                 res = await self._call_circus({"command": "list"})

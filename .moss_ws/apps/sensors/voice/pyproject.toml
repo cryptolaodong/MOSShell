@@ -1,10 +1,15 @@
 [project]
-name = "reachy-mini-body"
+name = "reachy-mini-voice"
 version = "0.1.0"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    "ghoshell-moss[audio,host]",
-    "pynput==1.8.1"
+    "ghoshell-moss[host]",
+    "sounddevice>=0.5",
+]
+
+[tool.uv]
+override-dependencies = [
+    "pyaudio ; sys_platform == 'never'",
 ]
 
 [tool.uv.sources]

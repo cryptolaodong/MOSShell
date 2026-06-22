@@ -7,7 +7,7 @@
 import asyncio
 from typing import Optional, List
 import numpy as np
-import pyaudio
+# pyaudio imported lazily below
 from ghoshell_common.contracts import LoggerItf
 
 from .async_concepts import (
@@ -24,7 +24,7 @@ from .async_states import (
     AsyncPdtListeningState,
     AsyncPdtWaitingState,
 )
-from .async_pyaudio_input import AsyncPyAudioInput
+# AsyncPyAudioInput imported lazily
 from .async_volcengine_bm import AsyncVocEngineBigModelASR
 from .configs import ListenerConfig
 from .async_concepts import AsyncLoggerCallback
@@ -52,6 +52,7 @@ class AsyncListenerServiceImpl(AsyncListenerService):
         # 初始化音频输入
         if audio_input is None:
             # 仅在没有外部音频输入时创建 PyAudio 实例
+            import pyaudio
             self._pa = pyaudio.PyAudio()
             audio_input_config = self._config.get_audio_input_config()
             # 注意：这里需要异步创建，但在构造函数中无法异步

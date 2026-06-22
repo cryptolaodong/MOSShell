@@ -12,6 +12,8 @@ from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
 from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.providers.anthropic import AnthropicProvider
+from pydantic_ai.models.openai import OpenAIModel
+from pydantic_ai.providers.openai import OpenAIProvider
 
 if TYPE_CHECKING:
     from ._runtime import Atom
@@ -113,20 +115,34 @@ class AtomMeta(GhostMeta):
             self._load_soul(ghost_workspace)
         model = self._model
         if model is None:
-            model_name = os.environ.get("ANTHROPIC_MODEL")
-            if not model_name:
-                raise RuntimeError(
-                    "ANTHROPIC_MODEL env var not set. "
-                    "Set it or pass model= explicitly."
+            # Try DeepSeek (OpenAI-compatible) first, then fall back to Anthropic
+            deepseek_key = os.environ.get("DEEPSEEK_API_KEY")
+            deepseek_model = os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash")
+            deepseek_base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+            if deepseek_key:
+                import httpx
+                model = OpenAIModel(
+                    model_name=deepseek_model,
+                    provider=OpenAIProvider(
+                        base_url=deepseek_base,
+                        api_key=deepseek_key,
+                        http_client=httpx.AsyncClient(timeout=60.0),
+                    ),
                 )
-            model = AnthropicModel(
-                model_name=model_name,
-                provider=self._provider or AnthropicProvider(),
-                # disable extended thinking by default; enable via model= param if needed
-                settings=AnthropicModelSettings(
-                    anthropic_thinking=BetaThinkingConfigDisabledParam(type="disabled"),
-                ),
-            )
+            else:
+                model_name = os.environ.get("ANTHROPIC_MODEL")
+                if not model_name:
+                    raise RuntimeError(
+                        "ANTHROPIC_MODEL or DEEPSEEK_API_KEY env var not set. "
+                        "Set one or pass model= explicitly."
+                    )
+                model = AnthropicModel(
+                    model_name=model_name,
+                    provider=self._provider or AnthropicProvider(),
+                    settings=AnthropicModelSettings(
+                        anthropic_thinking=BetaThinkingConfigDisabledParam(type="disabled"),
+                    ),
+                )
 
         agent = Agent[IoCContainer](
             name=self._name,

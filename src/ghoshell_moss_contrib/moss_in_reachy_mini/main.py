@@ -8,6 +8,7 @@ from ghoshell_moss.core.blueprint.channel_builder import ChannelCreator
 from ghoshell_moss.contracts import Workspace, LoggerItf
 from ghoshell_moss.core.concepts.channel import ChannelCtx
 from ghoshell_moss.core.py_channel import StatefulChannelRuntimeImpl
+from ghoshell_moss.core.concepts.command import PyCommand
 from ghoshell_moss_contrib.moss_in_reachy_mini.components.antennas import Antennas
 from ghoshell_moss_contrib.moss_in_reachy_mini.components.body import Body
 from ghoshell_moss_contrib.moss_in_reachy_mini.components.head import Head
@@ -41,14 +42,14 @@ class MossInReachyMini:
 
         # layer 1: body components
         self._head = Head(mini)
-        body = Body(mini, ws, logger)
-        antennas = Antennas(mini, logger=logger)
+        self._body = Body(mini, ws, logger)
+        self._antennas = Antennas(mini, logger=logger)
 
         # layer 2: media channels
         self._vision = Vision(mini, logger=logger)
 
         # layer 3: states
-        self._waken = WakenState(mini, body, self._head, antennas)
+        self._waken = WakenState(mini, self._body, self._head, self._antennas)
         self._boring = BoringState(mini)
         self._asleep = AsleepState(mini)
 
@@ -83,10 +84,33 @@ class MossInReachyMini:
         channel.build.startup(self.bootstrap)
         channel.build.close(self.aclose)
 
+        # Register core body commands on main_state so they're always available,
+        # even if _current_state is None during clear/refresh cycles.
+        channel.build.add_command(PyCommand(
+            self._body.dance, name="dance",
+            doc=self._body.dance_docstring, blocking=True,
+        ))
+        channel.build.add_command(PyCommand(
+            self._body.emotion, name="emotion",
+            doc=self._body.emotion_docstring, blocking=True,
+        ))
+        channel.build.add_command(PyCommand(
+            self._head.move, name="head_move", blocking=True,
+        ))
+        channel.build.add_command(PyCommand(
+            self._head.reset, name="head_reset", blocking=True,
+        ))
+        channel.build.add_command(PyCommand(
+            self._antennas.move, name="antennas_move", blocking=True,
+        ))
+        channel.build.add_command(PyCommand(
+            self._antennas.reset, name="antennas_reset", blocking=True,
+        ))
+
         default_state = self._default_state
         if not default_state in states:
             default_state = "waken"
-        channel.with_state(states[default_state])
+        channel.with_state(states[default_state], is_default=True)
         for name, state in states.items():
             if name != default_state:
                 channel.with_state(state)

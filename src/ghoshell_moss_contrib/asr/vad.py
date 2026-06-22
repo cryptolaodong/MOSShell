@@ -23,9 +23,9 @@ class EnergyVAD:
     def __init__(
         self,
         *,
-        silence_threshold: float = 100.0,
-        speech_threshold: float = 150.0,
-        silence_hold_time: float = 1.5,
+        silence_threshold: float = 400.0,
+        speech_threshold: float = 600.0,
+        silence_hold_time: float = 1.2,
     ):
         """
         Args:
@@ -83,3 +83,4 @@ class EnergyVAD:
     def __call__(self, audio_data: np.ndarray, vad_time: Optional[int] = None) -> bool:
         """兼容 VAD callable 签名：`Callable[[np.ndarray, Optional[int]], bool]`"""
         return self.check(audio_data)
+        silence_threshold: float = 400.0,
