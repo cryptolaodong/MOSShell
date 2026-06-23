@@ -25,6 +25,7 @@ from ghoshell_moss_contrib.asr.async_listener_service import AsyncListenerServic
 from ghoshell_moss_contrib.asr.configs import ListenerConfig
 from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
     is_speaking as robot_is_speaking,
+    mark_thinking as robot_mark_thinking,
     remaining_seconds as robot_speaking_remaining_seconds,
 )
 
@@ -253,6 +254,7 @@ async def main(matrix: Matrix) -> None:
                 # 防止 VAD auto-commit 和手动 commit 重复发送同一句
                 now = _time.monotonic()
                 if not (result.text == _dedup["text"] and now - _dedup["ts"] < 1.5):
+                    robot_mark_thinking()
                     matrix.session.add_input_signal(
                         result.text,
                         description=f"voice: {result.text[:50]}",

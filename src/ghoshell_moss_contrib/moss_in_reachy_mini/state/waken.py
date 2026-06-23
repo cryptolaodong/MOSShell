@@ -87,8 +87,23 @@ class WakenState(BaseReachyState):
         try:
             head_task = asyncio.create_task(self._head.on_idle())
             # 每 1s 检查是否 300s 无交互
-            while not head_task.done():
+            while True:
                 await asyncio.wait([head_task], timeout=1.0)
+                if head_task.done():
+                    try:
+                        exc = head_task.exception()
+                    except asyncio.CancelledError:
+                        raise
+                    if exc is None:
+                        self.logger.warning("Head idle task stopped unexpectedly; restarting")
+                    else:
+                        self.logger.exception(
+                            "Head idle task failed; restarting",
+                            exc_info=exc,
+                        )
+                    await asyncio.sleep(0.2)
+                    head_task = asyncio.create_task(self._head.on_idle())
+                    continue
                 if time.time() - idle_start > 300:
                     self.logger.info("WakenState idle 300s, switching to boring")
                     head_task.cancel()

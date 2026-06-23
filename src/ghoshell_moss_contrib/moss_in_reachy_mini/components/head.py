@@ -92,14 +92,20 @@ class Head:
 
     async def _breathing(self):
         while True:
-            _, current_antennas = self.mini.get_current_joint_positions()
-            current_head_pose = self.mini.get_current_head_pose()
-            breathing_move = BreathingMove(
-                interpolation_start_pose=current_head_pose,
-                interpolation_start_antennas=current_antennas,
-                interpolation_duration=1.0,
-            )
-            await self.mini.async_play_move(breathing_move)
+            try:
+                _, current_antennas = self.mini.get_current_joint_positions()
+                current_head_pose = self.mini.get_current_head_pose()
+                breathing_move = BreathingMove(
+                    interpolation_start_pose=current_head_pose,
+                    interpolation_start_antennas=current_antennas,
+                    interpolation_duration=1.0,
+                )
+                await self.mini.async_play_move(breathing_move)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                self.logger.exception("Head breathing move failed; retrying")
+                await asyncio.sleep(1.0)
 
     async def on_idle(self):
         self.logger.info("Head on-idle entering")
