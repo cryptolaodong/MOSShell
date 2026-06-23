@@ -6,6 +6,7 @@ from ghoshell_common.contracts import LoggerItf
 from reachy_mini import ReachyMini
 from reachy_mini.utils import create_head_pose
 
+from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speech_sync import wait_for_speech_start
 from ghoshell_moss_contrib.moss_in_reachy_mini.moves.head_move import HeadMove, BreathingMove
 
 
@@ -41,6 +42,11 @@ class Head:
     ):
         """Move to a pose in 6D space (position and orientation).
 
+        For synchronized speech and motion, place this CTML command before or
+        inside the sentence it should accompany, not after the whole sentence.
+        Example:
+        <apps.bodies_reachymini:head_move yaw="10" duration="0.6"/>我现在动动脑袋。
+
         Args:
             x (float): X coordinate of the position. range: [-1.5cm, +2.5cm]
             y (float): Y coordinate of the position. range: [-4cm, +4cm]
@@ -51,6 +57,7 @@ class Head:
             body_yaw (float): Body yaw angle. range(degree): [-155, +155]
             duration (float): Duration in seconds.
         """
+        await wait_for_speech_start("head_move", self.logger)
         await self.mini.async_play_move(move=HeadMove(
             self.mini.get_current_head_pose(),
             create_head_pose(x, y, z, roll, pitch, yaw),
@@ -73,6 +80,7 @@ class Head:
         :param duration: 重置时间，单位秒
         """
         self.switch_idle_mode(idle_mode)
+        await wait_for_speech_start("head_reset", self.logger)
         await self.mini.async_play_move(move=HeadMove(
             self.mini.get_current_head_pose(),
             create_head_pose(),
@@ -102,5 +110,3 @@ class Head:
                 await self._breathing()
         except asyncio.CancelledError:
             self.logger.info("Head on_idle task cancelled successfully")
-
-

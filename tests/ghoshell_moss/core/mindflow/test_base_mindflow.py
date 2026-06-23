@@ -1,8 +1,10 @@
 from typing import Callable, Coroutine
 from ghoshell_moss.core.mindflow.buffer_nucleus import BufferNucleus
+from ghoshell_moss.core.mindflow.input_signal_nucleus import InputSignalNucleus
 from ghoshell_moss.core.mindflow.base_mindflow import BaseMindflow
 from ghoshell_moss.core.blueprint.mindflow import Mindflow, Signal, Priority, Articulator, Action, Nucleus, Moment, \
     MindflowHook
+from ghoshell_moss.message import Message
 import janus
 import uvloop
 import threading
@@ -215,6 +217,105 @@ async def test_mindflow_run_with_multi_signal():
 
     # 只有一个信号, 不会有第二个行为.
     assert len(count) == 2
+
+
+@pytest.mark.asyncio
+async def test_input_signal_duplicate_id_not_reprocessed_after_attention_closes():
+    """同一个 input signal 被重复投递时, 已完成的 impulse 不应再次创建 attention."""
+    mindflow = make_base_mindflow()
+    nucleus = InputSignalNucleus(
+        name="input_nucleus",
+        description="input",
+        target_signal="input",
+        suppress_seconds=0.0,
+    )
+    mindflow.with_nucleus(nucleus)
+
+    attention_count = 0
+    first_attention_done = asyncio.Event()
+
+    async def _run_in_task():
+        nonlocal attention_count
+        async for attention in mindflow.loop():
+            async with attention:
+                attention_count += 1
+            first_attention_done.set()
+            if attention_count > 1:
+                break
+
+    async with mindflow:
+        task = asyncio.create_task(_run_in_task())
+        signal = Signal.new(
+            "input",
+            Message.new().with_content("hello"),
+            priority=Priority.NOTICE,
+        )
+        mindflow.add_signal(signal)
+        await asyncio.wait_for(first_attention_done.wait(), 2.0)
+        assert attention_count == 1
+        assert nucleus.peek() is None
+
+        # Runtime/channel clear 之后, 已启动过的 impulse id 仍应保留在防重表里。
+        first_attention_done.clear()
+        mindflow.clear()
+        mindflow.add_signal(signal.model_copy(deep=True))
+        await asyncio.sleep(0.7)
+        assert attention_count == 1
+        assert nucleus.peek() is None
+
+        mindflow.close()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_input_signal_duplicate_id_from_second_nucleus_not_reprocessed():
+    """同一个 signal 被两个 input nucleus 消费时, 第二个 source 的同 id impulse 不应重复触发."""
+    mindflow = make_base_mindflow()
+    primary = InputSignalNucleus(
+        name="input_nucleus",
+        description="input",
+        target_signal="input",
+        suppress_seconds=0.0,
+    )
+    secondary = InputSignalNucleus(
+        name="input_signal_nucleus",
+        description="input",
+        target_signal="input",
+        suppress_seconds=0.0,
+    )
+    mindflow.with_nucleus(primary)
+    mindflow.with_nucleus(secondary)
+
+    attention_count = 0
+    first_attention_done = asyncio.Event()
+
+    async def _run_in_task():
+        nonlocal attention_count
+        async for attention in mindflow.loop():
+            async with attention:
+                attention_count += 1
+            first_attention_done.set()
+            if attention_count > 1:
+                break
+
+    async with mindflow:
+        task = asyncio.create_task(_run_in_task())
+        signal = Signal.new(
+            "input",
+            Message.new().with_content("hello"),
+            priority=Priority.NOTICE,
+        )
+        mindflow.add_signal(signal)
+        await asyncio.wait_for(first_attention_done.wait(), 2.0)
+        assert attention_count == 1
+
+        await asyncio.sleep(0.7)
+        assert attention_count == 1
+        assert primary.peek() is None
+        assert secondary.peek() is None
+
+        mindflow.close()
+        await task
 
 
 def test_mindflow_in_differ_thread():

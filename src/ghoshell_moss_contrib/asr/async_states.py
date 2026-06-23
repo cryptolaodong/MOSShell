@@ -5,6 +5,7 @@
 """
 
 import asyncio
+import os
 import time
 from collections import deque
 from typing import Optional, Union, Callable
@@ -22,6 +23,17 @@ from .async_concepts import (
     Recognition,
     AsyncRecognitionCallback,
 )
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except Exception:
+        return default
+
+
+def _ends_terminal_punctuation(text: str) -> bool:
+    return text.rstrip().endswith(("。", "？", "?", "！", "!", "；", ";", ".", "…"))
 
 
 class AsyncAudioInputLoop:
@@ -415,7 +427,13 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._next_state: Optional[tuple[str, Optional[np.ndarray]]] = None
         self._last_non_empty_recognition_time: float = 0.0
         self._last_non_empty_text: str = ""
+        self._last_text_change_time: float = 0.0
         self._commit_reason: str = ""
+        self._stable_text_commit_seconds = _float_env("MOSS_ASR_STABLE_TEXT_COMMIT_SECONDS", 1.0)
+        self._stable_punct_commit_seconds = _float_env("MOSS_ASR_STABLE_PUNCT_COMMIT_SECONDS", 0.45)
+        self._empty_text_commit_seconds = _float_env("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", 1.0)
+        self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 1.0)
+        self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 1.2)
 
     def name(self) -> AsyncListenerStateName:
         return AsyncListenerStateName.PDT_LISTENING
@@ -430,6 +448,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._seq = 0
         self._last_non_empty_recognition_time = 0.0
         self._last_non_empty_text = ""
+        self._last_text_change_time = 0.0
         self._commit_reason = ""
 
         try:
@@ -513,8 +532,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._last_recognition = result
         # 跟踪最后一条非空识别结果
         if result.text and result.text.strip():
-            self._last_non_empty_recognition_time = time.time()
-            self._last_non_empty_text = result.text
+            now = time.time()
+            text = result.text.strip()
+            self._last_non_empty_recognition_time = now
+            if text != self._last_non_empty_text:
+                self._last_non_empty_text = text
+                self._last_text_change_time = now
 
         # 如果是最后一条结果但文本为空，用最后一条非空文本替换
         if result.is_last and not result.text and self._last_non_empty_text:
@@ -661,20 +684,39 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         )
                         await self._do_auto_commit("energy_vad")
 
-            # 音频队列空闲检测：如果检测到过语音活动，且音频队列持续为空超过 1.5 秒，自动提交
+            # 音频队列空闲检测：如果检测到过语音活动，且音频队列持续为空超过配置时间，自动提交
             # 这个检测不依赖 ASR 返回空文本，直接基于音频输入
             if not self._committed and has_speech:
                 audio_idle = time.time() - last_audio_time
-                if audio_idle >= 1.5:
+                if audio_idle >= self._audio_idle_commit_seconds:
                     self._logger.info(
                         f"Audio queue idle for {audio_idle:.1f}s after speech, auto-committing"
                     )
                     await self._do_auto_commit("audio_idle")
 
-            # ASR 空文本超时检测：如果已经识别到过文字，且超过 1.5 秒没有新的非空结果，自动提交
+            # ASR 文本稳定检测：服务端有时会持续重复同一句 partial，不再继续变化。
+            # 这种情况下按稳定时间主动提交，避免短句卡十几秒才进入 LLM。
+            if not self._committed and self._last_text_change_time > 0:
+                stable_elapsed = time.time() - self._last_text_change_time
+                text = self._last_non_empty_text
+                threshold = (
+                    self._stable_punct_commit_seconds
+                    if _ends_terminal_punctuation(text)
+                    else self._stable_text_commit_seconds
+                )
+                if stable_elapsed >= threshold:
+                    self._logger.info(
+                        "ASR stable text timeout (%.1fs, threshold=%.1fs, text=%r), auto-committing",
+                        stable_elapsed,
+                        threshold,
+                        text[:80],
+                    )
+                    await self._do_auto_commit("stable_text")
+
+            # ASR 空文本超时检测：如果已经识别到过文字，且超过配置时间没有新的非空结果，自动提交
             if not self._committed and self._last_non_empty_recognition_time > 0:
                 elapsed = time.time() - self._last_non_empty_recognition_time
-                if elapsed >= 1.5:
+                if elapsed >= self._empty_text_commit_seconds:
                     self._logger.info(
                         f"ASR empty text timeout ({elapsed:.1f}s since last non-empty result), auto-committing"
                     )
@@ -686,10 +728,13 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 try:
                     await asyncio.wait_for(
                         self._current_batch.wait_until_done(),
-                        timeout=5.0
+                        timeout=self._final_wait_seconds,
                     )
                 except asyncio.TimeoutError:
-                    self._logger.warning("PTT wait_until_done timed out")
+                    self._logger.warning(
+                        "PTT wait_until_done timed out after %.1fs; closing with last recognition",
+                        self._final_wait_seconds,
+                    )
                 break
 
             # 短暂休眠以避免忙等待

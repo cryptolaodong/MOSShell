@@ -14,6 +14,7 @@ from reachy_mini.utils import create_head_pose
 from reachy_mini_dances_library import DanceMove
 from reachy_mini_dances_library.collection.dance import AVAILABLE_MOVES
 
+from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speech_sync import wait_for_speech_start
 from ghoshell_moss_contrib.moss_in_reachy_mini.moves.head_move import HeadMove
 
 
@@ -127,6 +128,7 @@ def _load_emotions(ws: Workspace, logger: LoggerItf) -> dict:
 class Body:
     def __init__(self, mini: ReachyMini, ws: Workspace, logger: LoggerItf):
         self.mini = mini
+        self.logger = logger
         self._emotions = _load_emotions(ws, logger)
 
     async def dance(self, name: str):
@@ -137,6 +139,7 @@ class Body:
                     Text(text=f"本轮你生成的dance={name}是错误的，下次记得使用列表里正确的dance")
                 )]
             )
+        await wait_for_speech_start("dance", self.logger)
         await self.mini.async_play_move(DanceMove(name))
         await self.mini.async_play_move(move=HeadMove(
             self.mini.get_current_head_pose(),
@@ -159,6 +162,7 @@ class Body:
             f"以下dance的执行时长是固定的（内部BPM={DanceMove.default_bpm}），不随歌曲BPM变化。"
             f"每个dance后面标注的秒数就是实际执行时长（不含复位0.5s）。"
             f"必须使用以下列表中的name，严禁使用未定义的舞蹈名。"
+            f"如果dance要和一句话同步，命令要放在那句话之前或句中，不要放在整句话之后。"
         )
         return f"{header}\n" + "\n".join(dance_docstrings)
 
@@ -180,6 +184,7 @@ class Body:
                 )]
             )
 
+        await wait_for_speech_start("emotion", self.logger)
         await self.mini.async_play_move(RecordedMove(move=params)),
         await self.mini.async_play_move(move=HeadMove(
             self.mini.get_current_head_pose(),
@@ -194,7 +199,8 @@ class Body:
         # for name, params in self._emotions.items():
         #     emotion_docstrings.append(f"{name} ({params.get('description', '')})")
         # return f"Name choices in \n{"\n".join(emotion_docstrings)}\n"
-        return f"必须使用以下列表给定的emoji：{','.join(EMOJI_MAP.keys())}；万不可传非列表内的emoji"
-
-
+        return (
+            f"必须使用以下列表给定的emoji：{','.join(EMOJI_MAP.keys())}；万不可传非列表内的emoji。"
+            f"如果emotion要和一句话同步，命令要放在那句话之前或句中，不要放在整句话之后。"
+        )
 

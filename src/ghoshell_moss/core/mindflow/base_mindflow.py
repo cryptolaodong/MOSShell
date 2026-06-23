@@ -110,6 +110,8 @@ class AbsMindflow(Mindflow):
         self._signal_count: int = 0
         self._has_impulse_event = ThreadSafeEvent()
         self._set_impulse_lock = asyncio.Lock()
+        self._activated_impulse_ids: dict[str, float] = {}
+        self._activated_impulse_ttl = 300.0
 
         # 内部循环检测是否有新的 impulse.
         self._consuming_signal_task: asyncio.Task | None = None
@@ -315,6 +317,34 @@ class AbsMindflow(Mindflow):
         if nucleus is not None:
             nucleus.suppress(by)
 
+    def _impulse_key(self, impulse: Impulse) -> str:
+        return impulse.id
+
+    def _remember_activated_impulse(self, impulse: Impulse) -> None:
+        now = time.monotonic()
+        expired_at = now - self._activated_impulse_ttl
+        for key, activated_at in list(self._activated_impulse_ids.items()):
+            if activated_at < expired_at:
+                del self._activated_impulse_ids[key]
+        self._activated_impulse_ids[self._impulse_key(impulse)] = now
+
+    def _is_activated_impulse(self, impulse: Impulse) -> bool:
+        activated_at = self._activated_impulse_ids.get(self._impulse_key(impulse))
+        if activated_at is None:
+            return False
+        if time.monotonic() - activated_at > self._activated_impulse_ttl:
+            del self._activated_impulse_ids[self._impulse_key(impulse)]
+            return False
+        return True
+
+    def _is_replayable_activated_impulse(self, impulse: Impulse) -> bool:
+        if not self._is_activated_impulse(impulse):
+            return False
+        if self._current_attention is None or self._current_attention.is_aborted():
+            return True
+        current = self._current_attention.peek()
+        return current.source != impulse.source or current.id != impulse.id
+
     def _pop_impulse(self, impulse: Impulse) -> None:
         """通知 nucleus 被 pop 了. """
         nucleus = self._faculties.get(impulse.source, None)
@@ -353,6 +383,13 @@ class AbsMindflow(Mindflow):
                     self._fire_challenge(impulse, defender, 'suppressed')
                 return None
             else:
+                if self._is_activated_impulse(impulse):
+                    self._pop_impulse(impulse)
+                    self._logger.info(
+                        "%s drop already activated impulse %s from %s",
+                        self._log_prefix, impulse.id, impulse.source,
+                    )
+                    return None
                 await self._create_attention_from_impulse(impulse)
                 self._fire_challenge(impulse, None, 'initial')
             return None
@@ -417,6 +454,7 @@ class AbsMindflow(Mindflow):
                 inherit_outcome = Reaction()
             attention = self._build_attention(impulse, inherit_outcome)
             self._set_attention(attention)
+            self._remember_activated_impulse(impulse)
             return None
 
     @abstractmethod
@@ -446,13 +484,13 @@ class AbsMindflow(Mindflow):
         try:
             while not self._pop_new_attention_queue.sync_q.empty():
                 # maxsize 为 1 的队列.
-                attention = self._pop_new_attention_queue.sync_q.get_nowait()
+                self._pop_new_attention_queue.sync_q.get_nowait()
             self._pop_new_attention_queue.sync_q.put_nowait(self._current_attention)
 
         except janus.AsyncQueueShutDown:
             return None
         # 新 attention 入队.
-        self._logger.info("%s set attention %r", self._log_prefix, attention)
+        self._logger.info("%s set attention %r", self._log_prefix, self._current_attention)
         return None
 
     def _rank_nuclei(self, best_impulse: Impulse = None) -> Impulse | None:
@@ -469,6 +507,13 @@ class AbsMindflow(Mindflow):
                 continue
             # 加一行代码防蠢.
             impulse.source = nucleus.name()
+            if self._is_replayable_activated_impulse(impulse):
+                self._pop_impulse(impulse)
+                self._logger.info(
+                    "%s drop replayed activated impulse %s from %s during ranking",
+                    self._log_prefix, impulse.id, impulse.source,
+                )
+                continue
             impulse_priority_strength = impulse.priority_strength()
             if best_impulse is None:
                 best_impulse = impulse

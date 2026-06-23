@@ -6,6 +6,10 @@ from ghoshell_common.contracts import LoggerItf
 from ghoshell_moss.core.concepts.channel import ChannelCtx
 from reachy_mini import ReachyMini
 
+from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speech_sync import (
+    should_sync_interpreter_command,
+    wait_for_speech_start,
+)
 from ghoshell_moss_contrib.moss_in_reachy_mini.state.abcd import BaseReachyState
 
 
@@ -19,6 +23,8 @@ class BoringState(BaseReachyState):
 
     async def on_startup(self):
         self.logger.info("BoringState.on_startup Enter")
+        if should_sync_interpreter_command("switch_state"):
+            await wait_for_speech_start("switch_state", self.logger)
         self._mini.enable_motors()
 
     async def on_close(self):

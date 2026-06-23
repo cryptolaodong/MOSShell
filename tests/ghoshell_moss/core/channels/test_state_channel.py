@@ -32,6 +32,20 @@ async def test_main_state_commands():
 
 
 @pytest.mark.asyncio
+async def test_main_runtime_accepts_moss_alias_for_own_commands():
+    """Allow model output such as <moss:say> to target the main channel."""
+    chan = new_prime_channel(name="__main__")
+
+    @chan.build.command(name="say")
+    async def say(text: str) -> str:
+        return f"said: {text}"
+
+    async with chan.bootstrap() as runtime:
+        assert runtime.get_command("moss:say") is not None
+        assert await runtime.execute_command("moss:say", kwargs={"text": "hi"}) == "said: hi"
+
+
+@pytest.mark.asyncio
 async def test_register_state_via_new_state():
     """new_state() 返回 ChannelStateBuilder, 注册为可切换 state."""
     chan = new_stateful_channel(name="main")

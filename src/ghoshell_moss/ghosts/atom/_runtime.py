@@ -1,3 +1,4 @@
+import os
 from typing import AsyncIterator, TYPE_CHECKING
 from typing_extensions import Self
 from ghoshell_moss.core.blueprint.ghost import Ghost, GhostMeta
@@ -35,6 +36,14 @@ class Atom(Ghost):
         self._history: list[ModelMessage] = []
         self._last_context: dict = {}
         self._history_file = "ghost_history.json"
+        # Real-time voice should not replay full pydantic_ai history by default:
+        # it adds latency and can contain provider-incompatible assistant parts.
+        self._history_enabled = os.environ.get("MOSS_ATOM_HISTORY_ENABLED", "0").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
         # Load persisted history from session storage
         self._load_history()
 
@@ -55,6 +64,9 @@ class Atom(Ghost):
 
     def _load_history(self) -> None:
         """从 session storage 加载对话历史。"""
+        if not self._history_enabled:
+            self._logger.info("Atom history disabled by MOSS_ATOM_HISTORY_ENABLED")
+            return
         try:
             from ghoshell_moss.core.blueprint.session import Session
             session = self._container.get(Session)
@@ -63,10 +75,28 @@ class Atom(Ghost):
                 self._history = ModelMessagesTypeAdapter.validate_json(data)
                 self._logger.info("Loaded %d history messages from storage", len(self._history))
         except Exception as e:
-            self._logger.warning("Failed to load history: %s", e)
+            self._disable_history("failed to load persisted history", e)
+
+    def _disable_history(self, reason: str, error: Exception | None = None) -> None:
+        """Disable model history when pydantic_ai cannot safely replay it."""
+        self._history_enabled = False
+        self._history.clear()
+        try:
+            from ghoshell_moss.core.blueprint.session import Session
+            session = self._container.get(Session)
+            if session and session.scope_storage.exists(self._history_file):
+                session.scope_storage.remove(self._history_file)
+        except Exception as remove_error:
+            self._logger.debug("Failed to remove incompatible history: %s", remove_error)
+        if error is None:
+            self._logger.warning("Atom history disabled: %s", reason)
+        else:
+            self._logger.warning("Atom history disabled: %s: %s", reason, error)
 
     def _save_history(self) -> None:
         """持久化对话历史到 session storage。"""
+        if not self._history_enabled:
+            return
         try:
             from ghoshell_moss.core.blueprint.session import Session
             session = self._container.get(Session)
@@ -81,12 +111,19 @@ class Atom(Ghost):
 
         TODO: 不做窗口裁剪，长对话会超出模型 context window.
         """
+        if not self._history_enabled:
+            return []
         return list(self._history)
 
     def save_model_request(
         self, moment: Moment, response: ModelResponse
     ) -> None:
         """保存本轮交换到内存历史."""
+        if not self._history_enabled:
+            return
+        if not getattr(response, "parts", None):
+            self._logger.warning("Atom skip saving empty model response to history")
+            return
         self._history.append(self.to_model_request(moment))
         self._history.append(response)
         self._save_history()
@@ -118,8 +155,24 @@ class Atom(Ghost):
                 self.save_model_request(moment, stream.response)
         except AssertionError as e:
             # pydantic_ai 1.105.0 bug: TextContent in error retry path
-            self._logger.warning("Atom articulate AssertionError (pydantic_ai bug), retrying without history: %s", e)
+            self._disable_history("pydantic_ai rejected model history", e)
             # Retry once without history to bypass the bug
+            async with self._agent.run_stream(
+                user_prompt=request.parts,
+                message_history=[],
+                deps=self._container,
+            ) as stream:
+                async for text in stream.stream_text(delta=True):
+                    yield text
+                self.save_model_request(moment, stream.response)
+        except Exception as e:
+            error_text = str(e)
+            if (
+                "Invalid assistant message" not in error_text
+                and "content or tool_calls must be set" not in error_text
+            ):
+                raise
+            self._disable_history("model rejected assistant history", e)
             async with self._agent.run_stream(
                 user_prompt=request.parts,
                 message_history=[],

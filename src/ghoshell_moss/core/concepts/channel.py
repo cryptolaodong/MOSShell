@@ -781,6 +781,14 @@ class ChannelRuntime(ABC):
         elif not self.is_available():
             task.fail(CommandErrorCode.NOT_AVAILABLE.error('Channel Runtime not available'))
             return
+        if (
+            self.name == "__main__"
+            and len(paths) == 1
+            and paths[0] == "moss"
+            and self.get_child_channel("moss") is None
+        ):
+            task.chan = ""
+            paths = []
         # 对空函数做预处理, 允许传入 caller 本身.
         is_self_task = len(paths) == 0
         if is_self_task and task.is_bare_task():
@@ -980,6 +988,10 @@ class ChannelRuntime(ABC):
         使用 unique name 获取一个 command.
         """
         # 递归逻辑统一通过 ChannelTree 实现. 保留 Runtime 接口
+        if self.name == "__main__":
+            relative_path, command_name = Command.split_unique_name(name)
+            if relative_path == "moss" and self.get_child_channel("moss") is None:
+                name = command_name
         return self.tree.get_command(self.channel, name)
 
     async def wait_children_idled(self) -> None:

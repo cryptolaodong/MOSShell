@@ -41,7 +41,7 @@ class MossInReachyMini:
         self._allow_vision = allow_vision
 
         # layer 1: body components
-        self._head = Head(mini)
+        self._head = Head(mini, logger=logger)
         self._body = Body(mini, ws, logger)
         self._antennas = Antennas(mini, logger=logger)
 
@@ -49,9 +49,9 @@ class MossInReachyMini:
         self._vision = Vision(mini, logger=logger)
 
         # layer 3: states
-        self._waken = WakenState(mini, self._body, self._head, self._antennas)
-        self._boring = BoringState(mini)
-        self._asleep = AsleepState(mini)
+        self._waken = WakenState(mini, self._body, self._head, self._antennas, logger=logger)
+        self._boring = BoringState(mini, logger=logger)
+        self._asleep = AsleepState(mini, logger=logger)
 
     # -- context messages -----------------------------------------------------
 
@@ -59,7 +59,13 @@ class MossInReachyMini:
         messages = []
 
         state_message = Message.new(name="__reachy_mini_state__").with_content(
-            Text(text="Reachy Mini body channel — 各状态下可用命令通过 switch_state 切换后暴露"),
+            Text(
+                text=(
+                    "Reachy Mini body channel — 各状态下可用命令通过 switch_state 切换后暴露。"
+                    "动作可以自然加入；若要和某句话同步，请把身体命令放在那句话之前或句中，"
+                    "不要放在整句话之后。"
+                )
+            ),
         )
         messages.append(state_message)
 

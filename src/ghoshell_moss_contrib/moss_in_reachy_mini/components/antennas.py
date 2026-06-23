@@ -7,6 +7,8 @@ from reachy_mini import ReachyMini
 from reachy_mini.motion.move import Move
 from reachy_mini.utils.interpolation import time_trajectory
 
+from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speech_sync import wait_for_speech_start
+
 
 class AntennasMove(Move):
 
@@ -48,12 +50,16 @@ class Antennas:
         """
         Move the antenna to the given position and duration.
 
+        For synchronized speech and motion, place this CTML command before or
+        inside the sentence it should accompany, not after the whole sentence.
+
         Args:
             left (float): X coordinate of the position. range(degree): [-180, +180]
             right (float): Y coordinate of the position. range(degree): [-180, +180]
             duration (float): Duration of the movement.
         """
         r_degree, l_degree = self._get_current_position()
+        await wait_for_speech_start("antennas_move", self.logger)
         await self.mini.async_play_move(AntennasMove(
             current_left=l_degree,
             current_right=r_degree,
@@ -67,6 +73,7 @@ class Antennas:
         Reset the antenna to zero in duration.
         """
         r_degree, l_degree = self._get_current_position()
+        await wait_for_speech_start("antennas_reset", self.logger)
         await self.mini.async_play_move(AntennasMove(
             current_left=l_degree,
             current_right=r_degree,
@@ -77,5 +84,3 @@ class Antennas:
         r_rad, l_rad = self.mini.get_present_antenna_joint_positions()
         r_degree, l_degree = round(np.rad2deg(r_rad), 1), round(np.rad2deg(l_rad), 1)
         return r_degree, l_degree
-
-

@@ -40,6 +40,8 @@ class InputSignalNucleus(Nucleus):
 
         self._signals: list[Signal] = []
         self._impulse_cache: Impulse | None = None
+        self._consumed_signal_ids: dict[str, float] = {}
+        self._consumed_signal_ttl = 300.0
 
         # 未来看到这里的模型协作者需要记得, 关键代码必须加注释.
         # 比如这里如果用了 thread lock, 要考虑所有用锁的程序都要避免搞非计算逻辑的线程阻塞.
@@ -123,6 +125,14 @@ class InputSignalNucleus(Nucleus):
 
     def _process_signal(self, signal: Signal) -> None:
         with self._data_state_lock:
+            self._prune_consumed_signal_ids()
+            if signal.id in self._consumed_signal_ids:
+                self._logger.info(
+                    "[InputSignalNucleus %s] ignore consumed signal id=%s",
+                    self._name, signal.id,
+                )
+                return
+
             self._signals = [s for s in self._signals if not s.is_stale()]
             if signal.is_stale():
                 return
@@ -170,4 +180,17 @@ class InputSignalNucleus(Nucleus):
 
     def _atomic_clear_buffer(self) -> None:
         with self._data_state_lock:
+            now = time.monotonic()
+            for signal in self._signals:
+                self._consumed_signal_ids[signal.id] = now
+            if self._impulse_cache is not None:
+                self._consumed_signal_ids[self._impulse_cache.id] = now
+            self._prune_consumed_signal_ids(now)
             self.clear()
+
+    def _prune_consumed_signal_ids(self, now: float | None = None) -> None:
+        now = now or time.monotonic()
+        expired_at = now - self._consumed_signal_ttl
+        for signal_id, consumed_at in list(self._consumed_signal_ids.items()):
+            if consumed_at < expired_at:
+                del self._consumed_signal_ids[signal_id]

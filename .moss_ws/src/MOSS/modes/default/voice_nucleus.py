@@ -16,6 +16,10 @@ from typing_extensions import Self
 from ghoshell_moss.core.blueprint.mindflow import Nucleus, Signal, Impulse, Priority
 from ghoshell_moss.contracts.logger import LoggerItf, get_moss_logger
 from ghoshell_moss.message import Message, Text
+from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
+    is_speaking as robot_is_speaking,
+    remaining_seconds as robot_speaking_remaining_seconds,
+)
 from ghoshell_container import IoCContainer
 
 
@@ -68,6 +72,13 @@ class VoiceNucleus(Nucleus):
         return self._running
 
     async def __aenter__(self) -> Self:
+        enabled = os.environ.get(
+            "MOSS_ENABLE_LEGACY_VOICE_NUCLEUS",
+            os.environ.get("MOSS_VOICE_NUCLEUS_ENABLED", "0"),
+        ).lower()
+        if enabled not in {"1", "true", "yes", "on"}:
+            self._logger.info("[VoiceNucleus] Disabled; sensors/voice app owns ASR input")
+            return self
         self._running = True
         self._task = asyncio.create_task(self._listen_loop())
         self._logger.info("[VoiceNucleus] Started")
@@ -125,6 +136,13 @@ class VoiceNucleus(Nucleus):
                     return
                 if result.is_last:
                     text = result.text.strip()
+                    if robot_is_speaking(tail=2.0):
+                        nucleus_self._logger.info(
+                            "[VoiceNucleus] drop ASR while robot speaking: %.1fs left, text=%r",
+                            robot_speaking_remaining_seconds(),
+                            text[:80],
+                        )
+                        return
                     nucleus_self._logger.info("[VoiceNucleus] ASR: %s", text)
                     from ghoshell_moss.core.blueprint.matrix import Matrix
                     matrix = nucleus_self._container.get(Matrix)
@@ -168,7 +186,7 @@ class VoiceNucleus(Nucleus):
                     sample_i16 = sample_i16[:, 0]
 
                 # Skip during suppress (echo cancellation)
-                if time.time() < self._suppress_until:
+                if time.time() < self._suppress_until or robot_is_speaking(tail=0.2):
                     if batch is not None:
                         await batch.commit()
                         batch = None

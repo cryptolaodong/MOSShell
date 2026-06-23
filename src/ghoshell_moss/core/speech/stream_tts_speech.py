@@ -46,6 +46,7 @@ class TTSSpeechStream(SpeechStream):
         self._playing = False
         self._playing_loop_task: Optional[asyncio.Task] = None
         self._play_done_event = asyncio.Event()
+        self._play_completed = False
         self._closed_event = ThreadSafeEvent()
         self._has_audio_data = False
         self._log_prefix = "[TTSSpeechStream id=%s] " % batch_id
@@ -88,8 +89,12 @@ class TTSSpeechStream(SpeechStream):
         return self._closed_event.is_set()
 
     async def _play_loop(self) -> None:
+        completed = False
         try:
             await self._player.clear()
+            mark_pending = getattr(self._player, "mark_pending", None)
+            if callable(mark_pending):
+                mark_pending()
             if not self._started:
                 await self.start_synthesis()
             self.logger.debug("%s start new audio playing", self._log_prefix)
@@ -105,14 +110,20 @@ class TTSSpeechStream(SpeechStream):
                 await asyncio.sleep(0)
                 self.logger.debug("%s add audio %d bytes", self._log_prefix, len(data))
             await self._player.wait_play_done()
+            completed = True
         except asyncio.CancelledError:
             pass
         except Exception as e:
             self.logger.exception("%s play failed: %s", self._log_prefix, e)
         finally:
+            self._play_completed = completed
             self._play_done_event.set()
-            # 冗余的 clear.
-            await self._player.clear()
+            finish_stream = getattr(self._player, "finish_stream", None)
+            if completed and callable(finish_stream):
+                await finish_stream()
+            else:
+                # Interrupt/error path: hard clear the player and speaking gate.
+                await self._player.clear()
 
     async def start_play(self) -> None:
         if self._playing:
@@ -129,14 +140,24 @@ class TTSSpeechStream(SpeechStream):
         self._closed_event.set()
         self.logger.info("%s close TTS stream", self._log_prefix)
         if self._playing_loop_task is not None:
-            self._playing_loop_task.cancel()
-            try:
-                await self._playing_loop_task
-            except asyncio.CancelledError:
-                pass
+            if not self._playing_loop_task.done():
+                self._playing_loop_task.cancel()
+                try:
+                    await self._playing_loop_task
+                except asyncio.CancelledError:
+                    pass
+            else:
+                try:
+                    await self._playing_loop_task
+                except asyncio.CancelledError:
+                    pass
         # 防止有未关闭的 wait.
         self._play_done_event.set()
-        await asyncio.gather(self._tts_batch.close(), self._player.clear())
+        finish_stream = getattr(self._player, "finish_stream", None)
+        if self._play_completed and callable(finish_stream):
+            await asyncio.gather(self._tts_batch.close(), finish_stream())
+        else:
+            await asyncio.gather(self._tts_batch.close(), self._player.clear())
 
     def close_sync(self) -> None:
         self._running_loop.create_task(self.close)

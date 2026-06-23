@@ -189,16 +189,26 @@ class TestAtomMessages:
         atom = self._atom(tmp_path)
         assert atom.model_history() == []
 
-    def test_save_adds_to_history(self, tmp_path: Path):
-        from pydantic_ai.messages import ModelRequest, ModelResponse
+    def test_save_adds_to_history(self, tmp_path: Path, monkeypatch):
+        from pydantic_ai.messages import ModelRequest, ModelResponse, TextPart
+        monkeypatch.setenv("MOSS_ATOM_HISTORY_ENABLED", "1")
         atom = self._atom(tmp_path)
         moment = Moment(percepts=[Message.new().with_content("hi")])
-        response = ModelResponse(parts=[])
+        response = ModelResponse(parts=[TextPart(content="hello")])
         atom.save_model_request(moment, response)
         history = atom.model_history()
         assert len(history) == 2
         assert isinstance(history[0], ModelRequest)
         assert isinstance(history[1], ModelResponse)
+
+    def test_save_skips_empty_response(self, tmp_path: Path, monkeypatch):
+        from pydantic_ai.messages import ModelResponse
+        monkeypatch.setenv("MOSS_ATOM_HISTORY_ENABLED", "1")
+        atom = self._atom(tmp_path)
+        moment = Moment(percepts=[Message.new().with_content("hi")])
+        response = ModelResponse(parts=[])
+        atom.save_model_request(moment, response)
+        assert atom.model_history() == []
 
 
 # ── system_prompt ───────────────────────────────────

@@ -43,6 +43,29 @@ async def test_pop_clears_all():
 
 
 @pytest.mark.asyncio
+async def test_pop_marks_signal_id_consumed():
+    """同一个 signal id 被消费后再次送达时不应重建 impulse."""
+    notified = []
+    async with InputSignalNucleus() as nuc:
+        nuc.with_bus(
+            signal_broadcast=lambda s: None,
+            impulse_notify=lambda imp: notified.append(imp),
+        )
+        sig = Signal.new("input", Message.new().with_content("hello"))
+        nuc.add_signal(sig)
+        await asyncio.sleep(0.01)
+        imp = nuc.peek()
+        assert imp is not None
+        nuc.pop_impulse(imp)
+        assert nuc.peek() is None
+
+        nuc.add_signal(sig.model_copy(deep=True))
+        await asyncio.sleep(0.01)
+        assert nuc.peek() is None
+        assert len(notified) == 1
+
+
+@pytest.mark.asyncio
 async def test_full_messages_in_impulse():
     """pop 时的 Impulse 包含全部入队消息 (FIFO)."""
     async with InputSignalNucleus() as nuc:

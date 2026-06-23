@@ -23,6 +23,10 @@ from ghoshell_moss_contrib.asr.async_concepts import (
 )
 from ghoshell_moss_contrib.asr.async_listener_service import AsyncListenerServiceImpl
 from ghoshell_moss_contrib.asr.configs import ListenerConfig
+from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
+    is_speaking as robot_is_speaking,
+    remaining_seconds as robot_speaking_remaining_seconds,
+)
 
 load_dotenv()
 
@@ -201,10 +205,19 @@ async def main(matrix: Matrix) -> None:
 
     # 1. Listener config + service
     config = ListenerConfig()
-    # Use local microphone via sounddevice
-    from sd_audio_input import SoundDeviceAudioInput
-    from sd_audio_input import ReachyMicAudioInput
-    sd_input = ReachyMicAudioInput(rate=16000, channels=1)
+    from sd_audio_input import ReachyMicAudioInput, SoundDeviceAudioInput
+
+    mic_backend = os.environ.get("MOSS_VOICE_INPUT_BACKEND", "auto").strip().lower()
+    if mic_backend in {"local", "sounddevice"}:
+        console.print("[cyan]Voice mic backend: local sounddevice[/cyan]")
+        sd_input = SoundDeviceAudioInput(rate=16000, channels=1)
+    elif mic_backend in {"reachy", "robot"}:
+        console.print("[cyan]Voice mic backend: Reachy robot microphone[/cyan]")
+        os.environ.setdefault("MOSS_REACHY_MIC_FALLBACK", "0")
+        sd_input = ReachyMicAudioInput(rate=16000, channels=1)
+    else:
+        console.print("[cyan]Voice mic backend: auto (Reachy robot mic, then local fallback)[/cyan]")
+        sd_input = ReachyMicAudioInput(rate=16000, channels=1)
 
     inner = AsyncListenerServiceImpl(
         config=config,
@@ -226,6 +239,15 @@ async def main(matrix: Matrix) -> None:
             if not result.text or not result.text.strip():
                 return
             if result.is_last:
+                if robot_is_speaking(tail=2.0):
+                    logger.info(
+                        "[VoiceInput] drop ASR while robot speaking: %.1fs left, text=%r",
+                        robot_speaking_remaining_seconds(),
+                        result.text[:80],
+                    )
+                    await threaded.clear_buffer()
+                    display.show_state("idle")
+                    return
                 display.show_recognized(result.text, result.commit_reason or "")
                 display.show_state("sending")
                 # 防止 VAD auto-commit 和手动 commit 重复发送同一句
@@ -272,6 +294,9 @@ async def main(matrix: Matrix) -> None:
         while True:
             await asyncio.sleep(0.5)
             try:
+                if robot_is_speaking(tail=0.2):
+                    await threaded.clear_buffer()
+                    continue
                 current_state = await threaded.current_state()
                 state_name = current_state.name().value
                 # 如果不在监听状态，自动重新开始监听

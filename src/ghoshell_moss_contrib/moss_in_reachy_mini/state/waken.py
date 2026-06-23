@@ -10,6 +10,10 @@ from reachy_mini import ReachyMini
 from ghoshell_moss_contrib.moss_in_reachy_mini.components.antennas import Antennas
 from ghoshell_moss_contrib.moss_in_reachy_mini.components.body import Body
 from ghoshell_moss_contrib.moss_in_reachy_mini.components.head import Head
+from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speech_sync import (
+    should_sync_interpreter_command,
+    wait_for_speech_start,
+)
 from ghoshell_moss_contrib.moss_in_reachy_mini.state.abcd import BaseReachyState
 
 
@@ -67,6 +71,8 @@ class WakenState(BaseReachyState):
         }
 
     async def on_startup(self):
+        if should_sync_interpreter_command("switch_state"):
+            await wait_for_speech_start("switch_state", self.logger)
         self._mini.enable_motors()
         self._mini.wake_up()
         self._head.switch_idle_mode("breathing")
