@@ -88,6 +88,8 @@ def _canonicalize_safe_local_fallback_text(text: str) -> str:
     normalized = _normalize_local_asr_text(cleaned)
     exact_homophones = {
         "小番茗好": "小白你好",
+        "小白米好": "小白你好",
+        "小白糖": "小白你好",
     }
     if normalized in exact_homophones:
         return exact_homophones[normalized]
@@ -1012,6 +1014,38 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         if self._current_batch:
             await self._current_batch.commit()
 
+    def _local_fallback_empty_text_window(
+        self,
+        *,
+        has_speech: bool,
+        local_fallback_attempted: bool,
+        max_rms: float,
+        first_loud_audio_time: float,
+        last_loud_audio_time: float,
+    ) -> tuple[bool, bool, float, float]:
+        """Return whether local fallback may still rescue an empty short utterance."""
+        if (
+            not self._local_fallback_enabled
+            or local_fallback_attempted
+            or not has_speech
+            or self._last_non_empty_text.strip()
+            or max_rms < self._local_fallback_min_rms
+            or self._batch_started_at <= 0
+            or last_loud_audio_time <= 0
+        ):
+            return False, False, 0.0, 0.0
+        now = time.time()
+        speech_started_at = first_loud_audio_time or self._batch_started_at
+        elapsed = now - speech_started_at
+        last_loud_age = now - last_loud_audio_time
+        if self._local_fallback_trigger_max_seconds > 0 and elapsed > self._local_fallback_trigger_max_seconds:
+            return False, False, elapsed, last_loud_age
+        ready = (
+            elapsed >= self._local_fallback_min_seconds
+            and last_loud_age >= self._local_fallback_quiet_seconds
+        )
+        return True, ready, elapsed, last_loud_age
+
     async def _process_audio_batch(self, audio_queue: deque[np.ndarray]) -> None:
         """处理 PTT 音频批次"""
         global _NO_TEXT_COOLDOWN_UNTIL, _NO_TEXT_FAILURE_COUNT
@@ -1119,14 +1153,32 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         self._logger.info(
                             f"VAD detected silence after speech, auto-committing (rms={rms:.1f})"
                         )
-                        await self._do_auto_commit(
-                            "energy_vad",
-                            max_rms=round(max_rms, 1),
-                            has_speech=has_speech,
-                            last_loud_age=round(time.time() - last_loud_audio_time, 3)
-                            if last_loud_audio_time > 0
-                            else None,
+                        fallback_eligible, fallback_ready, fallback_elapsed, fallback_last_loud_age = (
+                            self._local_fallback_empty_text_window(
+                                has_speech=has_speech,
+                                local_fallback_attempted=local_fallback_attempted,
+                                max_rms=max_rms,
+                                first_loud_audio_time=first_loud_audio_time,
+                                last_loud_audio_time=last_loud_audio_time,
+                            )
                         )
+                        if fallback_eligible:
+                            _latency_log(
+                                "asr_energy_vad_defer_for_local_fallback",
+                                ready=fallback_ready,
+                                speech_elapsed=round(fallback_elapsed, 3),
+                                last_loud_age=round(fallback_last_loud_age, 3),
+                                max_rms=round(max_rms, 1),
+                            )
+                        else:
+                            await self._do_auto_commit(
+                                "energy_vad",
+                                max_rms=round(max_rms, 1),
+                                has_speech=has_speech,
+                                last_loud_age=round(time.time() - last_loud_audio_time, 3)
+                                if last_loud_audio_time > 0
+                                else None,
+                            )
 
             # 没听到明确人声时定期刷新 ASR 批次，避免短句落入长时间静音流后被服务端返回空文本。
             if (
