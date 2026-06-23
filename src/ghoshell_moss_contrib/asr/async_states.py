@@ -437,11 +437,13 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._last_text_change_time: float = 0.0
         self._commit_reason: str = ""
         self._stable_text_commit_seconds = _float_env("MOSS_ASR_STABLE_TEXT_COMMIT_SECONDS", 0.45)
-        self._stable_punct_commit_seconds = _float_env("MOSS_ASR_STABLE_PUNCT_COMMIT_SECONDS", 0.18)
-        self._empty_text_commit_seconds = _float_env("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", 0.45)
-        self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 0.35)
+        self._long_stable_text_commit_seconds = _float_env("MOSS_ASR_LONG_STABLE_TEXT_COMMIT_SECONDS", 1.2)
+        self._short_text_max_chars = _int_env("MOSS_ASR_SHORT_TEXT_MAX_CHARS", 8)
+        self._stable_punct_commit_seconds = _float_env("MOSS_ASR_STABLE_PUNCT_COMMIT_SECONDS", 0.25)
+        self._empty_text_commit_seconds = _float_env("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", 0.75)
+        self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 0.8)
         self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 0.35)
-        self._server_vad_ms = _int_env("MOSS_ASR_SERVER_VAD_MS", 500)
+        self._server_vad_ms = _int_env("MOSS_ASR_SERVER_VAD_MS", 900)
         self._batch_started_at = 0.0
         self._committed_at = 0.0
 
@@ -606,10 +608,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             )
 
             self._logger.warning(
-                "[ReachyLatency] asr_tuning energy_hold=%s stable=%.2fs punct=%.2fs empty=%.2fs "
-                "audio_idle=%.2fs final_wait=%.2fs server_vad=%dms",
+                "[ReachyLatency] asr_tuning energy_hold=%s short_stable=%.2fs long_stable=%.2fs "
+                "short_max=%d punct=%.2fs empty=%.2fs audio_idle=%.2fs final_wait=%.2fs server_vad=%dms",
                 getattr(self._vad, "_silence_hold_time", None),
                 self._stable_text_commit_seconds,
+                self._long_stable_text_commit_seconds,
+                self._short_text_max_chars,
                 self._stable_punct_commit_seconds,
                 self._empty_text_commit_seconds,
                 self._audio_idle_commit_seconds,
@@ -729,19 +733,24 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             if not self._committed and self._last_text_change_time > 0:
                 stable_elapsed = time.time() - self._last_text_change_time
                 text = self._last_non_empty_text
-                threshold = (
-                    self._stable_punct_commit_seconds
-                    if _ends_terminal_punctuation(text)
-                    else self._stable_text_commit_seconds
-                )
+                if _ends_terminal_punctuation(text):
+                    threshold = self._stable_punct_commit_seconds
+                    threshold_kind = "punct"
+                elif len(text.strip()) <= self._short_text_max_chars:
+                    threshold = self._stable_text_commit_seconds
+                    threshold_kind = "short"
+                else:
+                    threshold = self._long_stable_text_commit_seconds
+                    threshold_kind = "long"
                 if stable_elapsed >= threshold:
                     self._logger.info(
-                        "ASR stable text timeout (%.1fs, threshold=%.1fs, text=%r), auto-committing",
+                        "ASR stable text timeout (%.1fs, threshold=%.1fs kind=%s, text=%r), auto-committing",
                         stable_elapsed,
                         threshold,
+                        threshold_kind,
                         text[:80],
                     )
-                    await self._do_auto_commit("stable_text")
+                    await self._do_auto_commit(f"stable_text_{threshold_kind}")
 
             # ASR 空文本超时检测：如果已经识别到过文字，且超过配置时间没有新的非空结果，自动提交
             if not self._committed and self._last_non_empty_recognition_time > 0:

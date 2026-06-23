@@ -7,7 +7,7 @@ apps:
 bringup_apps:       # 启动时自动 bringup 的 app 列表
   - 'bodies/reachymini'
   - 'sensors/voice'
-ctml_version: ''    # 留空使用默认 CTML 版本
+ctml_version: 'reachy_fast'  # Reachy 语音模式使用精简 CTML，降低每轮 LLM 首 token 延迟
 description: ''     # 一行描述
 name: 'default'     # mode 名称（与目录名一致）
 ---

@@ -44,7 +44,7 @@ class EnergyVAD:
         self._silence_threshold = silence_threshold
         self._speech_threshold = speech_threshold
         self._silence_hold_time = (
-            _float_env("MOSS_ASR_ENERGY_SILENCE_HOLD_SECONDS", 0.45)
+            _float_env("MOSS_ASR_ENERGY_SILENCE_HOLD_SECONDS", 0.9)
             if silence_hold_time is None
             else silence_hold_time
         )
