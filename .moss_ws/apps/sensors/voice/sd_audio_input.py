@@ -187,6 +187,9 @@ class SoundDeviceAudioInput:
         self._warned_unavailable_read = False
         self._buffer = []
         self._lock = threading.Lock()
+        self._last_restart_attempt = 0.0
+        self._restart_attempts = 0
+        self._restart_interval = float(os.environ.get("MOSS_SOUNDDEVICE_RESTART_INTERVAL_SECONDS", "1.0"))
 
     def _callback(self, indata, frames, time_info, status):
         with self._lock:
@@ -248,6 +251,8 @@ class SoundDeviceAudioInput:
             return
         import sounddevice as sd
         try:
+            self._unavailable = False
+            self._warned_unavailable_read = False
             device = self._select_device(sd)
             device_info = sd.query_devices(device)
             print(
@@ -262,16 +267,58 @@ class SoundDeviceAudioInput:
                 blocksize=int(self.rate * 0.1),
             )
             self._stream.start()
+            self._restart_attempts = 0
         except Exception as e:
+            self._stream = None
             self._unavailable = True
             print(f"[SoundDeviceAudioInput] unavailable: {e}", flush=True)
             self._logger.error("SoundDeviceAudioInput unavailable: %s", e)
             if self._raise_on_unavailable:
                 raise
 
+    async def _try_restart(self, reason: str) -> bool:
+        if self._closed:
+            return False
+        now = time.time()
+        if now - self._last_restart_attempt < self._restart_interval:
+            return False
+        self._last_restart_attempt = now
+        self._restart_attempts += 1
+        print(
+            f"[SoundDeviceAudioInput] restarting input stream reason={reason} "
+            f"attempt={self._restart_attempts}",
+            flush=True,
+        )
+        self._logger.warning(
+            "SoundDeviceAudioInput restarting input stream reason=%s attempt=%d",
+            reason,
+            self._restart_attempts,
+        )
+        try:
+            await self.stop()
+            with self._lock:
+                self._buffer.clear()
+            await self.start()
+        except Exception as e:
+            self._stream = None
+            self._unavailable = True
+            self._logger.error("SoundDeviceAudioInput restart failed: %s", e)
+            print(f"[SoundDeviceAudioInput] restart failed: {e}", flush=True)
+            return False
+        return self._stream is not None and not self._unavailable
+
     async def read(self, *, rate=None, duration=None) -> np.ndarray:
         duration = duration or 0.1
         samples_needed = int(self.rate * duration)
+        if self._unavailable or self._stream is None:
+            restarted = await self._try_restart("unavailable" if self._unavailable else "no_stream")
+            if restarted:
+                self._warned_unavailable_read = False
+            else:
+                if not self._warned_unavailable_read:
+                    print("[SoundDeviceAudioInput] read silence: local microphone is unavailable", flush=True)
+                    self._warned_unavailable_read = True
+                return np.zeros(samples_needed, dtype=self.dtype)
         if self._unavailable:
             if not self._warned_unavailable_read:
                 print("[SoundDeviceAudioInput] read silence: local microphone is unavailable", flush=True)
@@ -301,8 +348,14 @@ class SoundDeviceAudioInput:
 
     async def stop(self) -> None:
         if self._stream:
-            self._stream.stop()
-            self._stream.close()
+            try:
+                self._stream.stop()
+            except Exception as e:
+                self._logger.debug("SoundDeviceAudioInput stop error: %s", e)
+            try:
+                self._stream.close()
+            except Exception as e:
+                self._logger.debug("SoundDeviceAudioInput close error: %s", e)
             self._stream = None
 
     async def close(self, error=None) -> None:

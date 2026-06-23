@@ -175,19 +175,15 @@ class AsyncVocEngineBigModelStreamASRBatch(AsyncRecognitionBatch):
                     # 缓冲音频数据
                     self._audio_buffer.append(audio_data)
 
-                    # 发送音频包
+                    # 发送音频包。提交后也要先把队列里已采集的音频发完，
+                    # 再由 None sentinel 发送尾包；否则短句容易被清空成空文本。
                     audio_bytes = nparray_to_bytes(audio_data)
                     self._send_audio_seq += 1
-                    sending_done = self._committed
-                    await self._send_audio_packet(ws, audio_bytes, sending_done)
+                    await self._send_audio_packet(ws, audio_bytes, sending_done=False)
 
                     self.logger.debug(
                         f"Sent audio packet seq {self._send_audio_seq} for batch {self.batch_id}"
                     )
-
-                    if sending_done:
-                        self._sending_done = True
-                        break
 
                 except asyncio.CancelledError:
                     raise
@@ -228,11 +224,7 @@ class AsyncVocEngineBigModelStreamASRBatch(AsyncRecognitionBatch):
 
                     # 处理识别结果
                     if rec.sentence:
-                        # 判断是否是尾包
-                        is_last_audio_rec = (
-                            self._sending_done and self._receive_rec_seq == self._send_audio_seq
-                        )
-                        rec.is_last = self._stop_on_sentence or is_last_audio_rec
+                        rec.is_last = self._stop_on_sentence or (self._committed and self._sending_done)
 
                     self._last_recognition = rec
                     await self.callback.on_recognition(rec)
@@ -368,19 +360,15 @@ class AsyncVocEngineBigModelStreamASRBatch(AsyncRecognitionBatch):
         self._committed = True
         self.logger.info(f"Committed ASR batch {self.batch_id}")
 
-        # 通知发送循环可以结束：先清空队列再放 sentinel，避免阻塞
+        # 通知发送循环可以结束：保留队列中已采集的音频，最后追加 sentinel。
         try:
-            # 清空队列中的音频数据（commit 后不需要再发送）
-            while not self._audio_queue.empty():
-                try:
-                    self._audio_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
             self._audio_queue.put_nowait(None)
         except asyncio.QueueFull:
-            # 极端情况：put_nowait 仍然满，跳过 sentinel
-            # 发送循环会在 0.1s 超时后检测到 self._committed 并自行退出
-            pass
+            try:
+                self._audio_queue.get_nowait()
+                self._audio_queue.put_nowait(None)
+            except asyncio.QueueEmpty:
+                pass
 
     async def get_last_recognition(self) -> Optional[Recognition]:
         return self._last_recognition

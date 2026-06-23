@@ -41,8 +41,8 @@ class EnergyVAD:
             speech_threshold: RMS 高于此值视为有语音活动
             silence_hold_time: 语音结束后静音持续多久触发（秒）
         """
-        self._silence_threshold = silence_threshold
-        self._speech_threshold = speech_threshold
+        self._silence_threshold = _float_env("MOSS_ASR_ENERGY_SILENCE_RMS", silence_threshold)
+        self._speech_threshold = _float_env("MOSS_ASR_ENERGY_SPEECH_RMS", speech_threshold)
         self._silence_hold_time = (
             _float_env("MOSS_ASR_ENERGY_SILENCE_HOLD_SECONDS", 0.9)
             if silence_hold_time is None

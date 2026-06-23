@@ -306,3 +306,22 @@ class TestAdapter:
         assert _simple_fast_reply_for_text("小白你好") == "在呢。"
         assert _simple_fast_reply_for_text("你好，帮我看看延迟") is None
         assert _request_text([TextContent(content="context"), TextContent(content="你好")]) == "你好"
+
+    def test_simple_fast_reply_for_ack_request(self):
+        from ._runtime import _simple_fast_reply_for_text
+
+        assert (
+            _simple_fast_reply_for_text(
+                "小白请听我说完这是一句比较长的话我想测试你会不会等我完整说完以后再回答我你只需要回答收到"
+            )
+            == "收到。"
+        )
+        assert _simple_fast_reply_for_text("请详细解释一下为什么回答收到比较好") is None
+
+    def test_simple_fast_reply_for_capability_request(self):
+        from ._runtime import _simple_fast_reply_for_text
+
+        assert _simple_fast_reply_for_text("小白你现在能做什么请用一句话说") == (
+            "我能听你说话、回答问题，并同步表情和头部动作。"
+        )
+        assert _simple_fast_reply_for_text("你能做什么，详细展开讲讲") is None

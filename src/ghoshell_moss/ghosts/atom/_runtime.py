@@ -37,6 +37,24 @@ _FAST_GREETING_WORDS = {
     "你好小白",
 }
 _FAST_GREETING_STRIP_RE = re.compile(r"[\s,，。！？!?；;：:\.、~～]+")
+_FAST_ACK_PATTERNS = (
+    "只需要回答收到",
+    "只要回答收到",
+    "直接回答收到",
+    "请回答收到",
+    "只回复收到",
+    "回复收到",
+)
+_FAST_CAPABILITY_PATTERNS = (
+    "能做什么",
+    "可以做什么",
+    "会做什么",
+    "你会什么",
+    "你能干什么",
+    "能干什么",
+    "有什么功能",
+)
+_FAST_CAPABILITY_DETAIL_WORDS = ("详细", "展开", "具体", "列表", "所有")
 
 
 def _request_text(parts) -> str:
@@ -49,11 +67,36 @@ def _request_text(parts) -> str:
     return last_text
 
 
-def _simple_fast_reply_for_text(text: str) -> str | None:
+def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
     normalized = _FAST_GREETING_STRIP_RE.sub("", text).lower()
     if normalized in _FAST_GREETING_WORDS:
-        return os.environ.get("MOSS_FAST_GREETING_REPLY", "在呢。")
-    return None
+        return "greeting", os.environ.get("MOSS_FAST_GREETING_REPLY", "在呢。")
+    if (
+        len(normalized) <= 90
+        and (
+            normalized in {"回答收到", "回复收到", "收到"}
+            or any(pattern in normalized for pattern in _FAST_ACK_PATTERNS)
+        )
+    ):
+        return "ack", os.environ.get("MOSS_FAST_ACK_REPLY", "收到。")
+    if (
+        len(normalized) <= 45
+        and any(pattern in normalized for pattern in _FAST_CAPABILITY_PATTERNS)
+        and not any(word in normalized for word in _FAST_CAPABILITY_DETAIL_WORDS)
+    ):
+        return (
+            "capability",
+            os.environ.get(
+                "MOSS_FAST_CAPABILITY_REPLY",
+                "我能听你说话、回答问题，并同步表情和头部动作。",
+            ),
+        )
+    return None, None
+
+
+def _simple_fast_reply_for_text(text: str) -> str | None:
+    _, reply = _simple_fast_reply_with_kind(text)
+    return reply
 
 
 class Atom(Ghost):
@@ -196,17 +239,22 @@ class Atom(Ghost):
         first_token_seen = False
         total_chars = 0
 
-        if os.environ.get("MOSS_FAST_GREETING_ENABLED", "1").lower() not in {
+        fast_reply_env = os.environ.get(
+            "MOSS_FAST_REPLY_ENABLED",
+            os.environ.get("MOSS_FAST_GREETING_ENABLED", "1"),
+        )
+        if fast_reply_env.lower() not in {
             "0",
             "false",
             "no",
             "off",
         }:
             request_text = _request_text(request.parts)
-            fast_reply = _simple_fast_reply_for_text(request_text)
+            fast_kind, fast_reply = _simple_fast_reply_with_kind(request_text)
             if fast_reply:
                 self._logger.warning(
-                    "[ReachyLatency] llm_fast_path kind=greeting text_len=%d prompt_chars=%d",
+                    "[ReachyLatency] llm_fast_path kind=%s text_len=%d prompt_chars=%d",
+                    fast_kind,
                     len(request_text),
                     prompt_chars,
                 )

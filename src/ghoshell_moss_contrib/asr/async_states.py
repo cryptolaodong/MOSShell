@@ -5,10 +5,12 @@
 """
 
 import asyncio
+import json
 import os
+import sys
+import threading
 import time
 from collections import deque
-from datetime import datetime
 from pathlib import Path
 from typing import Optional, Union, Callable
 import numpy as np
@@ -41,17 +43,173 @@ def _int_env(name: str, default: int) -> int:
         return default
 
 
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
 def _ends_terminal_punctuation(text: str) -> bool:
     return text.rstrip().endswith(("。", "？", "?", "！", "!", "；", ";", ".", "…"))
 
 
+_LOCAL_WHISPER_LOCK = threading.Lock()
+_LOCAL_WHISPER_MODEL = None
+_LOCAL_WHISPER_MODEL_KEY: tuple[str, str, str] | None = None
+
+
+def _clean_local_asr_text(text: str) -> str:
+    return (text or "").strip().strip(" \t\r\n，,。！？!?；;：:")
+
+
+def _normalize_local_asr_text(text: str) -> str:
+    normalized = _clean_local_asr_text(text).lower()
+    replacements = {
+        "現": "现",
+        "麼": "么",
+        "什麼": "什么",
+        "嗎": "吗",
+        "會": "会",
+        "臺": "台",
+        "妳": "你",
+    }
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
+    return normalized.replace(" ", "")
+
+
+def _canonicalize_safe_local_fallback_text(text: str) -> str:
+    cleaned = _clean_local_asr_text(text)
+    normalized = _normalize_local_asr_text(cleaned)
+    wake_homophones = ("想掰", "小拜", "小摆", "小百")
+    for wake in wake_homophones:
+        if normalized.startswith(wake) and len(normalized) <= 8:
+            rest = normalized[len(wake):]
+            if any(token in rest for token in ("你好", "在吗", "在不在", "哈喽", "hello")):
+                return f"小白{rest}"
+    if normalized == "你现在能做什么":
+        return "你现在能做什么"
+    return cleaned
+
+
+def _is_safe_local_fallback_text(text: str) -> bool:
+    normalized = _normalize_local_asr_text(_canonicalize_safe_local_fallback_text(text))
+    if len(normalized) <= 1:
+        return False
+    exact_phrases = {
+        "小白",
+        "小白你好",
+        "你好小白",
+        "小白在吗",
+        "小白在不在",
+        "在吗小白",
+        "你现在能做什么",
+        "你能做什么",
+        "现在能做什么",
+        "能做什么",
+        "你会做什么",
+        "你是谁",
+    }
+    if normalized in exact_phrases:
+        return True
+    if normalized.startswith("小白") and len(normalized) <= 8:
+        return any(token in normalized for token in ("你好", "在吗", "在不在", "哈喽", "hello"))
+    if len(normalized) <= 12:
+        return any(
+            token in normalized
+            for token in ("能做什么", "会做什么", "介绍一下", "你是谁")
+        )
+    return False
+
+
+def _local_whisper_transcribe(
+    audio: np.ndarray,
+    *,
+    sample_rate: int,
+    model_name: str,
+    cache_dir: str,
+    site_packages: str,
+    initial_prompt: str,
+) -> str:
+    global _LOCAL_WHISPER_MODEL, _LOCAL_WHISPER_MODEL_KEY
+
+    if sample_rate != 16000:
+        raise ValueError(f"local whisper fallback expects 16kHz audio, got {sample_rate}")
+    if site_packages and site_packages not in sys.path:
+        sys.path.insert(0, site_packages)
+
+    import contextlib
+    import io
+    import whisper
+
+    key = (model_name, cache_dir, site_packages)
+    with _LOCAL_WHISPER_LOCK:
+        if _LOCAL_WHISPER_MODEL is None or _LOCAL_WHISPER_MODEL_KEY != key:
+            kwargs = {"download_root": cache_dir} if cache_dir else {}
+            _LOCAL_WHISPER_MODEL = whisper.load_model(model_name, **kwargs)
+            _LOCAL_WHISPER_MODEL_KEY = key
+        model = _LOCAL_WHISPER_MODEL
+
+    flat = np.asarray(audio).reshape(-1)
+    if flat.dtype != np.float32:
+        flat = np.clip(flat.astype(np.float32), -32768.0, 32767.0) / 32768.0
+
+    # OpenAI whisper's Python package can print tqdm progress even with verbose=False.
+    # Keep the voice app logs clean while the tiny fallback runs.
+    with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+        result = model.transcribe(
+            flat,
+            language="zh",
+            fp16=False,
+            verbose=False,
+            condition_on_previous_text=False,
+            initial_prompt=initial_prompt or None,
+            temperature=0.0,
+            beam_size=1,
+            best_of=1,
+        )
+    return _clean_local_asr_text(str(result.get("text") or ""))
+
+
+def _workspace_root_for_logs() -> Path | None:
+    workspace = os.environ.get("MOSS_WORKSPACE", "").strip()
+    if workspace:
+        return Path(workspace)
+    current_file = Path(__file__).resolve()
+    for parent in current_file.parents:
+        if parent.name == ".moss_ws":
+            return parent
+        candidate = parent / ".moss_ws"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _latency_log_path() -> Path:
+    configured = os.environ.get("MOSS_VOICE_LATENCY_LOG", "").strip()
+    workspace = _workspace_root_for_logs()
+    if configured:
+        path = Path(configured)
+    elif workspace:
+        path = workspace / "runtime" / "logs" / "voice_latency.log"
+    else:
+        path = Path(".moss_ws/runtime/logs/voice_latency.log")
+    if not path.is_absolute() and workspace:
+        if path.parts and path.parts[0] == ".moss_ws":
+            path = workspace.parent.joinpath(*path.parts)
+        else:
+            path = workspace / path
+    return path
+
+
 def _latency_log(event: str, **fields) -> None:
-    path = Path(os.environ.get("MOSS_VOICE_LATENCY_LOG", ".moss_ws/runtime/logs/voice_latency.log"))
+    path = _latency_log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        values = " ".join(f"{key}={value!r}" for key, value in fields.items())
+        payload = {"event": event, "ts": time.time(), **fields}
         with path.open("a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().isoformat(timespec='milliseconds')} {event} {values}\n")
+            f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
     except Exception:
         pass
 
@@ -456,7 +614,33 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._empty_text_commit_seconds = _float_env("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", 0.75)
         self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 0.8)
         self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 0.35)
+        self._empty_final_wait_seconds = _float_env("MOSS_ASR_EMPTY_FINAL_WAIT_SECONDS", 0.35)
         self._server_vad_ms = _int_env("MOSS_ASR_SERVER_VAD_MS", 900)
+        self._stable_text_min_quiet_seconds = _float_env("MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS", 0.65)
+        self._prespeech_batch_max_seconds = _float_env("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", 3.0)
+        self._speech_no_text_max_seconds = _float_env("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", 5.5)
+        self._speech_no_text_min_quiet_seconds = _float_env("MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS", 0.65)
+        self._speech_no_text_hard_multiplier = _float_env("MOSS_ASR_SPEECH_NO_TEXT_HARD_MULTIPLIER", 1.35)
+        self._speech_no_text_action = os.environ.get("MOSS_ASR_SPEECH_NO_TEXT_ACTION", "rotate").strip().lower()
+        self._empty_retry_enabled = _bool_env("MOSS_ASR_EMPTY_RETRY_ENABLED", False)
+        self._empty_retry_min_rms = _float_env("MOSS_ASR_EMPTY_RETRY_MIN_RMS", 1200.0)
+        self._empty_retry_timeout_seconds = _float_env("MOSS_ASR_EMPTY_RETRY_TIMEOUT_SECONDS", 1.6)
+        self._input_noise_gate_enabled = _bool_env("MOSS_ASR_INPUT_NOISE_GATE_ENABLED", True)
+        self._input_gate_rms = _float_env("MOSS_ASR_INPUT_GATE_RMS", 450.0)
+        self._input_gate_preroll_seconds = _float_env("MOSS_ASR_INPUT_GATE_PREROLL_SECONDS", 0.25)
+        self._input_gate_tail_seconds = _float_env("MOSS_ASR_INPUT_GATE_TAIL_SECONDS", 0.55)
+        self._local_fallback_enabled = _bool_env("MOSS_ASR_LOCAL_FALLBACK_ENABLED", False)
+        self._local_fallback_site_packages = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_SITE_PACKAGES", "").strip()
+        self._local_fallback_model = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_MODEL", "tiny").strip() or "tiny"
+        self._local_fallback_cache_dir = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_CACHE_DIR", "").strip()
+        self._local_fallback_initial_prompt = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_INITIAL_PROMPT", "").strip()
+        self._local_fallback_min_rms = _float_env("MOSS_ASR_LOCAL_FALLBACK_MIN_RMS", 900.0)
+        self._local_fallback_min_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS", 0.8)
+        self._local_fallback_quiet_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS", 0.45)
+        self._local_fallback_timeout_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_TIMEOUT_SECONDS", 2.0)
+        self._local_fallback_trigger_max_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS", 3.8)
+        self._local_fallback_max_audio_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_MAX_AUDIO_SECONDS", 6.0)
+        self._local_fallback_pad_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_PAD_SECONDS", 0.15)
         self._batch_started_at = 0.0
         self._committed_at = 0.0
 
@@ -515,6 +699,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
 
     async def clear_buffer(self) -> None:
         self._closed = True
+        self._next_state = (AsyncListenerStateName.PDT_WAITING.value, None)
         if self._current_batch:
             await self._current_batch.close()
 
@@ -621,9 +806,17 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             )
 
             self._logger.warning(
-                "[ReachyLatency] asr_tuning energy_hold=%s short_stable=%.2fs long_stable=%.2fs "
-                "short_max=%d punct=%.2fs empty=%.2fs audio_idle=%.2fs final_wait=%.2fs server_vad=%dms",
+                "[ReachyLatency] asr_tuning energy_hold=%s speech_rms=%s silence_rms=%s "
+                "short_stable=%.2fs long_stable=%.2fs "
+                "short_max=%d punct=%.2fs empty=%.2fs audio_idle=%.2fs final_wait=%.2fs "
+                "empty_final_wait=%.2fs server_vad=%dms stable_quiet=%.2fs prespeech_max=%.2fs "
+                "speech_no_text_max=%.2fs speech_no_text_quiet=%.2fs "
+                "speech_no_text_action=%s hard=%.2fx empty_retry=%s retry_min_rms=%.1f "
+                "input_gate=%s gate_rms=%.1f gate_pre=%.2fs gate_tail=%.2fs "
+                "local_fallback=%s local_model=%s local_min_rms=%.1f local_quiet=%.2fs",
                 getattr(self._vad, "_silence_hold_time", None),
+                getattr(self._vad, "_speech_threshold", None),
+                getattr(self._vad, "_silence_threshold", None),
                 self._stable_text_commit_seconds,
                 self._long_stable_text_commit_seconds,
                 self._short_text_max_chars,
@@ -631,11 +824,30 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._empty_text_commit_seconds,
                 self._audio_idle_commit_seconds,
                 self._final_wait_seconds,
+                self._empty_final_wait_seconds,
                 self._server_vad_ms,
+                self._stable_text_min_quiet_seconds,
+                self._prespeech_batch_max_seconds,
+                self._speech_no_text_max_seconds,
+                self._speech_no_text_min_quiet_seconds,
+                self._speech_no_text_action,
+                self._speech_no_text_hard_multiplier,
+                self._empty_retry_enabled,
+                self._empty_retry_min_rms,
+                self._input_noise_gate_enabled,
+                self._input_gate_rms,
+                self._input_gate_preroll_seconds,
+                self._input_gate_tail_seconds,
+                self._local_fallback_enabled,
+                self._local_fallback_model,
+                self._local_fallback_min_rms,
+                self._local_fallback_quiet_seconds,
             )
             _latency_log(
                 "asr_tuning",
                 energy_hold=getattr(self._vad, "_silence_hold_time", None),
+                speech_rms=getattr(self._vad, "_speech_threshold", None),
+                silence_rms=getattr(self._vad, "_silence_threshold", None),
                 short_stable=self._stable_text_commit_seconds,
                 long_stable=self._long_stable_text_commit_seconds,
                 short_max=self._short_text_max_chars,
@@ -643,7 +855,27 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 empty=self._empty_text_commit_seconds,
                 audio_idle=self._audio_idle_commit_seconds,
                 final_wait=self._final_wait_seconds,
+                empty_final_wait=self._empty_final_wait_seconds,
                 server_vad_ms=self._server_vad_ms,
+                stable_quiet=self._stable_text_min_quiet_seconds,
+                prespeech_max=self._prespeech_batch_max_seconds,
+                speech_no_text_max=self._speech_no_text_max_seconds,
+                speech_no_text_quiet=self._speech_no_text_min_quiet_seconds,
+                speech_no_text_action=self._speech_no_text_action,
+                speech_no_text_hard_multiplier=self._speech_no_text_hard_multiplier,
+                empty_retry=self._empty_retry_enabled,
+                empty_retry_min_rms=self._empty_retry_min_rms,
+                input_gate=self._input_noise_gate_enabled,
+                input_gate_rms=self._input_gate_rms,
+                input_gate_preroll=self._input_gate_preroll_seconds,
+                input_gate_tail=self._input_gate_tail_seconds,
+                local_fallback=self._local_fallback_enabled,
+                local_fallback_model=self._local_fallback_model,
+                local_fallback_min_rms=self._local_fallback_min_rms,
+                local_fallback_min_seconds=self._local_fallback_min_seconds,
+                local_fallback_quiet=self._local_fallback_quiet_seconds,
+                local_fallback_timeout=self._local_fallback_timeout_seconds,
+                local_fallback_trigger_max=self._local_fallback_trigger_max_seconds,
             )
 
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
@@ -688,7 +920,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         finally:
             self._closed = True
 
-    async def _do_auto_commit(self, reason: str) -> None:
+    async def _do_auto_commit(self, reason: str, **log_fields) -> None:
         """统一的自动提交入口，幂等操作"""
         if self._committed:
             return
@@ -706,6 +938,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             reason=reason,
             elapsed=round(self._committed_at - self._batch_started_at, 3) if self._batch_started_at else 0.0,
             text_len=len(self._last_non_empty_text.strip()),
+            **log_fields,
         )
         if self._current_batch:
             await self._current_batch.commit()
@@ -715,7 +948,18 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._logger.info("PTT _process_audio_batch started")
         chunk_count = 0
         last_audio_time = time.time()  # 最后一次收到音频的时间
-        has_speech = False  # 是否检测到过语音活动（音频队列非空）
+        last_loud_audio_time = 0.0
+        has_speech = False  # 是否检测到过真正超过阈值的语音活动
+        max_rms = 0.0
+        speech_threshold = float(getattr(self._vad, "_speech_threshold", 600.0) or 600.0)
+        gate_threshold = max(0.0, self._input_gate_rms)
+        activity_threshold = max(speech_threshold, gate_threshold) if self._input_noise_gate_enabled else speech_threshold
+        frame_duration = float(getattr(self._recognizer, "frame_duration", 0.1) or 0.1)
+        preroll_frames = max(1, int(self._input_gate_preroll_seconds / frame_duration))
+        preroll: deque[np.ndarray] = deque(maxlen=preroll_frames)
+        input_gate_open = not self._input_noise_gate_enabled
+        input_gate_last_loud_time = 0.0
+        local_fallback_attempted = False
         while not self._closed:
             # 检查批次是否完成
             if self._current_batch and await self._current_batch.is_done():
@@ -726,14 +970,49 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             if audio_queue:
                 audio_data = audio_queue.popleft()
                 last_audio_time = time.time()
-                has_speech = True
-                if self._current_batch:
+                rms = float(np.sqrt(np.mean(audio_data.astype(float) ** 2)))
+                max_rms = max(max_rms, rms)
+                if rms >= activity_threshold:
+                    last_loud_audio_time = last_audio_time
+                    has_speech = True
+                should_send_audio = True
+                if self._input_noise_gate_enabled:
+                    should_send_audio = False
+                    preroll.append(audio_data)
+                    if rms >= gate_threshold:
+                        input_gate_last_loud_time = last_audio_time
+                        if not input_gate_open:
+                            input_gate_open = True
+                            _latency_log(
+                                "asr_input_gate_open",
+                                rms=round(rms, 1),
+                                threshold=round(gate_threshold, 1),
+                                preroll_frames=len(preroll),
+                            )
+                            if self._current_batch:
+                                for frame in list(preroll)[:-1]:
+                                    await self._current_batch.buffer(frame)
+                        should_send_audio = True
+                    elif input_gate_open and input_gate_last_loud_time > 0:
+                        should_send_audio = (
+                            last_audio_time - input_gate_last_loud_time
+                            <= self._input_gate_tail_seconds
+                        )
+                        if not should_send_audio:
+                            input_gate_open = False
+                            _latency_log(
+                                "asr_input_gate_close",
+                                quiet=round(last_audio_time - input_gate_last_loud_time, 3),
+                            )
+                            preroll.clear()
+                    else:
+                        should_send_audio = False
+                if should_send_audio and self._current_batch:
                     await self._current_batch.buffer(audio_data)
 
                 # 本地 VAD 静音检测
                 if self._vad is not None and not self._committed:
                     chunk_count += 1
-                    rms = float(np.sqrt(np.mean(audio_data.astype(float) ** 2)))
                     should_commit = self._vad(audio_data)
                     # 每50个chunk打印一次诊断信息（约2.5秒）
                     if chunk_count % 50 == 0:
@@ -747,7 +1026,126 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         self._logger.info(
                             f"VAD detected silence after speech, auto-committing (rms={rms:.1f})"
                         )
-                        await self._do_auto_commit("energy_vad")
+                        await self._do_auto_commit(
+                            "energy_vad",
+                            max_rms=round(max_rms, 1),
+                            has_speech=has_speech,
+                            last_loud_age=round(time.time() - last_loud_audio_time, 3)
+                            if last_loud_audio_time > 0
+                            else None,
+                        )
+
+            # 没听到明确人声时定期刷新 ASR 批次，避免短句落入长时间静音流后被服务端返回空文本。
+            if (
+                not self._committed
+                and not has_speech
+                and self._prespeech_batch_max_seconds > 0
+                and self._batch_started_at > 0
+                and time.time() - self._batch_started_at >= self._prespeech_batch_max_seconds
+            ):
+                elapsed = time.time() - self._batch_started_at
+                self._logger.info(
+                    "No speech before %.1fs, rotating ASR batch (max_rms=%.1f)",
+                    elapsed,
+                    max_rms,
+                )
+                _latency_log(
+                    "asr_prespeech_rotate",
+                    elapsed=round(elapsed, 3),
+                    max_rms=round(max_rms, 1),
+                )
+                break
+
+            # 短句听到了能量但云端还没出字时，用本地 tiny whisper 抢救一次。
+            # 只在批次早期触发，避免长句中途停顿被提前截断。
+            if (
+                not self._committed
+                and self._local_fallback_enabled
+                and not local_fallback_attempted
+                and has_speech
+                and not self._last_non_empty_text.strip()
+                and max_rms >= self._local_fallback_min_rms
+                and self._batch_started_at > 0
+                and last_loud_audio_time > 0
+            ):
+                elapsed = time.time() - self._batch_started_at
+                last_loud_age = time.time() - last_loud_audio_time
+                if (
+                    elapsed >= self._local_fallback_min_seconds
+                    and last_loud_age >= self._local_fallback_quiet_seconds
+                    and (
+                        self._local_fallback_trigger_max_seconds <= 0
+                        or elapsed <= self._local_fallback_trigger_max_seconds
+                    )
+                ):
+                    local_fallback_attempted = True
+                    fallback_text = await self._try_local_fallback(
+                        reason="local_whisper_quiet",
+                        max_rms=max_rms,
+                        last_loud_age=last_loud_age,
+                    )
+                    if fallback_text:
+                        await self._finish_with_local_fallback(
+                            fallback_text,
+                            reason="local_whisper_quiet",
+                            max_rms=max_rms,
+                            last_loud_age=last_loud_age,
+                        )
+                        break
+
+            # 如果本地 VAD 明确听到过声音，但云端 ASR 长时间没有任何文字，
+            # 这通常是被背景噪声或批次边界卡住的坏流。尽快旋转，避免短唤醒词被旧流吞掉。
+            if (
+                not self._committed
+                and has_speech
+                and not self._last_non_empty_text.strip()
+                and self._speech_no_text_max_seconds > 0
+                and self._batch_started_at > 0
+            ):
+                elapsed = time.time() - self._batch_started_at
+                if elapsed >= self._speech_no_text_max_seconds:
+                    last_loud_age = (
+                        time.time() - last_loud_audio_time
+                        if last_loud_audio_time > 0
+                        else float("inf")
+                    )
+                    hard_elapsed = self._speech_no_text_max_seconds * self._speech_no_text_hard_multiplier
+                    if last_loud_age >= self._speech_no_text_min_quiet_seconds or elapsed >= hard_elapsed:
+                        reason = "speech_no_text_timeout"
+                        if self._speech_no_text_action in {"rotate", "reset", "drop"}:
+                            self._commit_reason = reason
+                            self._logger.info(
+                                "Speech energy without ASR text for %.1fs "
+                                "(max_rms=%.1f, last_loud_age=%.1f), rotating batch",
+                                elapsed,
+                                max_rms,
+                                last_loud_age,
+                            )
+                            _latency_log(
+                                "asr_speech_no_text_rotate",
+                                elapsed=round(elapsed, 3),
+                                max_rms=round(max_rms, 1),
+                                last_loud_age=round(last_loud_age, 3)
+                                if last_loud_age != float("inf")
+                                else None,
+                                hard_elapsed=round(hard_elapsed, 3),
+                            )
+                            await self._save_debug_batch(reason=reason, max_rms=max_rms)
+                            break
+                        self._logger.info(
+                            "Speech energy without ASR text for %.1fs "
+                            "(max_rms=%.1f, last_loud_age=%.1f), auto-committing",
+                            elapsed,
+                            max_rms,
+                            last_loud_age,
+                        )
+                        await self._do_auto_commit(
+                            reason,
+                            max_rms=round(max_rms, 1),
+                            last_loud_age=round(last_loud_age, 3)
+                            if last_loud_age != float("inf")
+                            else None,
+                        )
 
             # 音频队列空闲检测：如果检测到过语音活动，且音频队列持续为空超过配置时间，自动提交
             # 这个检测不依赖 ASR 返回空文本，直接基于音频输入
@@ -757,7 +1155,13 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     self._logger.info(
                         f"Audio queue idle for {audio_idle:.1f}s after speech, auto-committing"
                     )
-                    await self._do_auto_commit("audio_idle")
+                    await self._do_auto_commit(
+                        "audio_idle",
+                        max_rms=round(max_rms, 1),
+                        last_loud_age=round(time.time() - last_loud_audio_time, 3)
+                        if last_loud_audio_time > 0
+                        else None,
+                    )
 
             # ASR 文本稳定检测：服务端有时会持续重复同一句 partial，不再继续变化。
             # 这种情况下按稳定时间主动提交，避免短句卡十几秒才进入 LLM。
@@ -774,11 +1178,20 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     threshold = self._long_stable_text_commit_seconds
                     threshold_kind = "long"
                 if stable_elapsed >= threshold:
+                    quiet_elapsed = (
+                        time.time() - last_loud_audio_time
+                        if last_loud_audio_time > 0
+                        else float("inf")
+                    )
+                    if quiet_elapsed < self._stable_text_min_quiet_seconds:
+                        await asyncio.sleep(0.01)
+                        continue
                     self._logger.info(
-                        "ASR stable text timeout (%.1fs, threshold=%.1fs kind=%s, text=%r), auto-committing",
+                        "ASR stable text timeout (%.1fs, threshold=%.1fs kind=%s, quiet=%.1fs, text=%r), auto-committing",
                         stable_elapsed,
                         threshold,
                         threshold_kind,
+                        quiet_elapsed,
                         text[:80],
                     )
                     await self._do_auto_commit(f"stable_text_{threshold_kind}")
@@ -796,16 +1209,31 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             if self._committed:
                 # 等待批次完成或超时
                 wait_started = time.time()
+                final_wait_seconds = (
+                    self._empty_final_wait_seconds
+                    if not self._last_non_empty_text.strip()
+                    else self._final_wait_seconds
+                )
                 try:
                     await asyncio.wait_for(
                         self._current_batch.wait_until_done(),
-                        timeout=self._final_wait_seconds,
+                        timeout=final_wait_seconds,
                     )
                 except asyncio.TimeoutError:
                     self._logger.warning(
                         "PTT wait_until_done timed out after %.1fs; closing with last recognition",
-                        self._final_wait_seconds,
+                        final_wait_seconds,
                     )
+                if (
+                    self._empty_retry_enabled
+                    and not self._last_non_empty_text.strip()
+                    and max_rms >= self._empty_retry_min_rms
+                    and self._current_batch is not None
+                ):
+                    audio = await self._current_batch.get_buffer()
+                    retry_text = await self._retry_empty_audio(audio, max_rms=max_rms)
+                    if retry_text:
+                        self._logger.info("ASR empty retry recovered text=%r", retry_text[:80])
                 self._logger.warning(
                     "[ReachyLatency] asr_final_wait done elapsed=%.2fs total=%.2fs reason=%s",
                     time.time() - wait_started,
@@ -823,6 +1251,196 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
 
             # 短暂休眠以避免忙等待
             await asyncio.sleep(0.01)
+
+    async def _save_debug_batch(self, *, reason: str, max_rms: float) -> None:
+        if self._current_batch is None:
+            return
+        try:
+            audio = await self._current_batch.get_buffer()
+        except Exception as e:
+            self._logger.debug("Failed to get ASR debug audio: %s", e)
+            return
+        if audio is None or len(audio) <= 0:
+            return
+        rec = Recognition(
+            batch_id=self._batch_id,
+            text=self._last_non_empty_text.strip(),
+            seq=self._seq + 1,
+            sentence=False,
+            is_last=True,
+            created=time.time(),
+            commit_reason=reason,
+            audio_max_rms=round(max_rms, 1),
+        )
+        _latency_log(
+            "asr_debug_batch_save_requested",
+            reason=reason,
+            samples=int(len(audio)),
+            max_rms=round(max_rms, 1),
+        )
+        await self._callback.save_batch(rec, audio)
+
+    async def _try_local_fallback(self, *, reason: str, max_rms: float, last_loud_age: float) -> str:
+        if self._current_batch is None:
+            return ""
+        try:
+            audio = await self._current_batch.get_buffer()
+        except Exception as e:
+            _latency_log("asr_local_fallback_error", reason=reason, error=str(e)[:160])
+            return ""
+        if audio is None or len(audio) <= 0:
+            return ""
+
+        sample_rate = int(getattr(self._recognizer, "sample_rate", 16000) or 16000)
+        flat = np.asarray(audio).reshape(-1)
+        if self._local_fallback_max_audio_seconds > 0:
+            max_samples = int(sample_rate * self._local_fallback_max_audio_seconds)
+            if len(flat) > max_samples:
+                flat = flat[-max_samples:]
+        if self._local_fallback_pad_seconds > 0:
+            pad_samples = int(sample_rate * self._local_fallback_pad_seconds)
+            if pad_samples > 0:
+                pad = np.zeros(pad_samples, dtype=flat.dtype)
+                flat = np.concatenate([pad, flat, pad])
+
+        started = time.time()
+        _latency_log(
+            "asr_local_fallback_start",
+            reason=reason,
+            samples=int(len(flat)),
+            duration=round(len(flat) / sample_rate, 3) if sample_rate > 0 else 0.0,
+            max_rms=round(max_rms, 1),
+            last_loud_age=round(last_loud_age, 3),
+            model=self._local_fallback_model,
+        )
+        try:
+            text = await asyncio.wait_for(
+                asyncio.to_thread(
+                    _local_whisper_transcribe,
+                    flat,
+                    sample_rate=sample_rate,
+                    model_name=self._local_fallback_model,
+                    cache_dir=self._local_fallback_cache_dir,
+                    site_packages=self._local_fallback_site_packages,
+                    initial_prompt=self._local_fallback_initial_prompt,
+                ),
+                timeout=max(0.1, self._local_fallback_timeout_seconds),
+            )
+        except asyncio.TimeoutError:
+            _latency_log(
+                "asr_local_fallback_timeout",
+                reason=reason,
+                elapsed=round(time.time() - started, 3),
+                timeout=self._local_fallback_timeout_seconds,
+            )
+            return ""
+        except Exception as e:
+            _latency_log(
+                "asr_local_fallback_error",
+                reason=reason,
+                elapsed=round(time.time() - started, 3),
+                error=str(e)[:200],
+            )
+            return ""
+
+        _latency_log(
+            "asr_local_fallback_done",
+            reason=reason,
+            elapsed=round(time.time() - started, 3),
+            text_len=len(text),
+            text_preview=text[:40],
+        )
+        if text and not _is_safe_local_fallback_text(text):
+            _latency_log(
+                "asr_local_fallback_reject",
+                reason=reason,
+                text_len=len(text),
+                text_preview=text[:40],
+                reject_reason="unsafe_text",
+            )
+            return ""
+        return _canonicalize_safe_local_fallback_text(text)
+
+    async def _finish_with_local_fallback(
+        self,
+        text: str,
+        *,
+        reason: str,
+        max_rms: float,
+        last_loud_age: float,
+    ) -> None:
+        text = _clean_local_asr_text(text)
+        if not text:
+            return
+        self._commit_reason = reason
+        self._last_non_empty_text = text
+        now = time.time()
+        self._last_non_empty_recognition_time = now
+        self._last_text_change_time = now
+        _latency_log(
+            "asr_local_fallback_emit",
+            reason=reason,
+            text_len=len(text),
+            text_preview=text[:40],
+            max_rms=round(max_rms, 1),
+            last_loud_age=round(last_loud_age, 3),
+        )
+        rec = Recognition(
+            batch_id=self._batch_id,
+            text=text,
+            seq=self._seq + 1,
+            sentence=True,
+            is_last=True,
+            created=now,
+            commit_reason=reason,
+            audio_max_rms=round(max_rms, 1),
+        )
+        await self.on_recognition(rec)
+
+    async def _retry_empty_audio(self, audio: np.ndarray, *, max_rms: float) -> str:
+        if audio is None or len(audio) <= 0:
+            return ""
+        sample_rate = int(getattr(self._recognizer, "sample_rate", 16000) or 16000)
+        frame_duration = float(getattr(self._recognizer, "frame_duration", 0.1) or 0.1)
+        frame_samples = max(1, int(sample_rate * frame_duration))
+        retry_started = time.time()
+        retry_batch = await self._recognizer.new_batch(
+            callback=self,
+            batch_id=uuid(),
+            vad=self._server_vad_ms,
+            stop_on_sentence=False,
+        )
+        self._logger.info(
+            "Retrying empty high-energy ASR batch: samples=%d max_rms=%.1f",
+            len(audio),
+            max_rms,
+        )
+        _latency_log(
+            "asr_empty_retry_start",
+            samples=int(len(audio)),
+            max_rms=round(max_rms, 1),
+        )
+        try:
+            await retry_batch.start()
+            for pos in range(0, len(audio), frame_samples):
+                await retry_batch.buffer(audio[pos : pos + frame_samples])
+                await asyncio.sleep(0.002)
+            await retry_batch.commit()
+            await retry_batch.wait_until_done(timeout=self._empty_retry_timeout_seconds)
+        except Exception as e:
+            self._logger.warning("ASR empty retry failed: %s", e)
+        finally:
+            try:
+                await retry_batch.close()
+            except Exception:
+                pass
+        text = self._last_non_empty_text.strip()
+        _latency_log(
+            "asr_empty_retry_done",
+            elapsed=round(time.time() - retry_started, 3),
+            text_len=len(text),
+        )
+        return text
 
 
 class AsyncPdtWaitingState(AsyncListenerState):

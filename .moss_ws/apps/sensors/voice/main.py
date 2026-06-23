@@ -7,7 +7,8 @@ os.environ['GST_PLUGIN_SYSTEM_PATH'] = ''
 import json
 import logging
 import threading
-from datetime import datetime
+import time
+import wave
 from pathlib import Path
 from typing import Optional
 
@@ -26,6 +27,7 @@ from ghoshell_moss_contrib.asr.async_concepts import (
 )
 from ghoshell_moss_contrib.asr.async_listener_service import AsyncListenerServiceImpl
 from ghoshell_moss_contrib.asr.configs import ListenerConfig
+from ghoshell_moss_contrib.asr.voice_turn_gate import VoiceTurnDecision, VoiceTurnGate
 from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
     is_speaking as robot_is_speaking,
     mark_thinking as robot_mark_thinking,
@@ -37,15 +39,88 @@ load_dotenv()
 # VAD auto-listen mode - no PTT key needed
 
 
+def _truthy_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _workspace_root_for_logs() -> Path | None:
+    workspace = os.environ.get("MOSS_WORKSPACE", "").strip()
+    if workspace:
+        return Path(workspace)
+    current_file = Path(__file__).resolve()
+    for parent in current_file.parents:
+        if parent.name == ".moss_ws":
+            return parent
+    return None
+
+
+def _latency_log_path() -> Path:
+    configured = os.environ.get("MOSS_VOICE_LATENCY_LOG", "").strip()
+    workspace = _workspace_root_for_logs()
+    if configured:
+        path = Path(configured)
+    elif workspace:
+        path = workspace / "runtime" / "logs" / "voice_latency.log"
+    else:
+        path = Path(".moss_ws/runtime/logs/voice_latency.log")
+    if not path.is_absolute() and workspace:
+        if path.parts and path.parts[0] == ".moss_ws":
+            path = workspace.parent.joinpath(*path.parts)
+        else:
+            path = workspace / path
+    return path
+
+
 def _latency_log(event: str, **fields) -> None:
-    path = Path(os.environ.get("MOSS_VOICE_LATENCY_LOG", ".moss_ws/runtime/logs/voice_latency.log"))
+    path = _latency_log_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps(fields, ensure_ascii=False, sort_keys=True)
+        payload = {"event": event, "ts": time.time(), **fields}
         with path.open("a", encoding="utf-8") as f:
-            f.write(f"{datetime.now().isoformat(timespec='milliseconds')} {event} {payload}\n")
+            f.write(json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n")
     except Exception:
         pass
+
+
+def _voice_debug_audio_dir() -> Path:
+    configured = os.environ.get("MOSS_VOICE_DEBUG_AUDIO_DIR", "").strip()
+    workspace = _workspace_root_for_logs()
+    if configured:
+        path = Path(configured)
+    elif workspace:
+        path = workspace / "runtime" / "voice_debug"
+    else:
+        path = Path(".moss_ws/runtime/voice_debug")
+    if not path.is_absolute() and workspace:
+        path = workspace / path
+    return path
+
+
+def _audio_rms_peak(audio: np.ndarray) -> tuple[float, int]:
+    if audio is None or len(audio) <= 0:
+        return 0.0, 0
+    flat = np.asarray(audio).reshape(-1)
+    if len(flat) <= 0:
+        return 0.0, 0
+    values = flat.astype(float)
+    rms = float(np.sqrt(np.mean(values ** 2)))
+    peak = int(np.max(np.abs(values)))
+    return rms, peak
+
+
+def _write_debug_wav(path: Path, audio: np.ndarray, sample_rate: int = 16000) -> None:
+    flat = np.asarray(audio).reshape(-1)
+    if flat.dtype != np.int16:
+        flat = np.clip(flat, -32768, 32767).astype(np.int16)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(sample_rate)
+        wav.writeframes(flat.tobytes())
 
 # ── ThreadedListenerService (extracted from ConsolePTTChat) ──────────────
 
@@ -248,69 +323,212 @@ async def main(matrix: Matrix) -> None:
     import time as _time
 
     _dedup = {"text": "", "ts": 0.0}  # 防重复 send
+    require_address = _truthy_env("MOSS_VOICE_REQUIRE_ADDRESS_WHEN_IDLE", True)
+    active_seconds = float(os.environ.get("MOSS_VOICE_SESSION_ACTIVE_SECONDS", "12"))
+    robot_speaking_tail_seconds = float(os.environ.get("MOSS_VOICE_ROBOT_SPEAKING_TAIL_SECONDS", "3.5"))
+    address_words = tuple(
+        word.strip()
+        for word in os.environ.get("MOSS_VOICE_ADDRESS_WORDS", "小白").split(",")
+        if word.strip()
+    )
+    idle_partial_chars = int(os.environ.get("MOSS_VOICE_IDLE_UNADDRESSED_PARTIAL_CHARS", "999"))
+    idle_partial_seconds = float(os.environ.get("MOSS_VOICE_IDLE_UNADDRESSED_PARTIAL_SECONDS", "1.2"))
+    local_fallback_address_min_rms = float(
+        os.environ.get("MOSS_VOICE_LOCAL_FALLBACK_ADDRESS_MIN_RMS", "1200")
+    )
+    local_fallback_followup_min_rms = float(
+        os.environ.get("MOSS_VOICE_LOCAL_FALLBACK_FOLLOWUP_MIN_RMS", "900")
+    )
+    turn_gate = VoiceTurnGate(
+        require_address_when_idle=require_address,
+        address_words=address_words,
+        active_seconds=active_seconds,
+        idle_partial_chars=idle_partial_chars,
+        idle_partial_seconds=idle_partial_seconds,
+    )
+    control_file = Path(os.environ.get("MOSS_VOICE_CONTROL_FILE", "/private/tmp/moss_voice_control.json"))
+    _control = {"mtime": 0.0}
+    save_empty_audio = _truthy_env("MOSS_VOICE_SAVE_EMPTY_ASR_AUDIO", True)
+    save_all_audio = _truthy_env("MOSS_VOICE_SAVE_ALL_ASR_AUDIO", False)
+    debug_audio_min_rms = float(os.environ.get("MOSS_VOICE_DEBUG_AUDIO_MIN_RMS", "500"))
+    debug_audio_max_seconds = float(os.environ.get("MOSS_VOICE_DEBUG_AUDIO_MAX_SECONDS", "12"))
+    debug_audio_dir = _voice_debug_audio_dir()
+
+    async def _poll_control_file() -> None:
+        try:
+            stat = control_file.stat()
+        except FileNotFoundError:
+            return
+        except Exception:
+            return
+        if stat.st_mtime <= _control["mtime"]:
+            return
+        _control["mtime"] = stat.st_mtime
+        try:
+            payload = json.loads(control_file.read_text(encoding="utf-8"))
+        except Exception:
+            payload = {}
+        action = str(payload.get("action") or "").strip().lower()
+        if action == "clear":
+            await threaded.clear_buffer()
+            display.show_state("idle")
+            _latency_log(
+                "voice_control_clear",
+                nonce=str(payload.get("nonce") or "")[:80],
+                source=str(payload.get("source") or "")[:80],
+            )
 
     class VoiceCallback(AsyncListenerCallback):
         async def on_recognition(self, result: Recognition):
             if not result.text or not result.text.strip():
                 return
             if result.is_last:
-                if robot_is_speaking(tail=2.0):
+                text = result.text.strip()
+                if robot_is_speaking(tail=robot_speaking_tail_seconds):
                     logger.info(
                         "[VoiceInput] drop ASR while robot speaking: %.1fs left, text=%r",
                         robot_speaking_remaining_seconds(),
-                        result.text[:80],
+                        text[:80],
                     )
                     _latency_log(
                         "voice_drop_robot_speaking",
                         left_seconds=round(robot_speaking_remaining_seconds(), 3),
-                        text_len=len(result.text.strip()),
+                        text_len=len(text),
                         reason=result.commit_reason or "",
+                        text_preview=text[:40],
                     )
                     await threaded.clear_buffer()
                     display.show_state("idle")
                     return
-                display.show_recognized(result.text, result.commit_reason or "")
+                now = _time.monotonic()
+                is_local_fallback = (result.commit_reason or "").startswith("local_whisper")
+                audio_max_rms = float(getattr(result, "audio_max_rms", 0.0) or 0.0)
+                addressed_before = turn_gate.is_addressed(text)
+                active_left_before = turn_gate.active_left(now)
+                active_before = active_left_before > 0
+                weak_local_fallback = False
+                if is_local_fallback and (addressed_before or active_before):
+                    min_rms = (
+                        local_fallback_address_min_rms
+                        if addressed_before
+                        else local_fallback_followup_min_rms
+                    )
+                    weak_local_fallback = audio_max_rms > 0 and audio_max_rms < min_rms
+                if weak_local_fallback:
+                    turn_gate.reset_idle_partial()
+                    gate_decision = VoiceTurnDecision(
+                        accept=False,
+                        reason="local_fallback_weak_audio",
+                        addressed=addressed_before,
+                        active_before=active_before,
+                        active_left_seconds=round(active_left_before, 3),
+                        text_len=len(text),
+                    )
+                else:
+                    gate_decision = turn_gate.decide_final(text, now)
+                if not gate_decision.accept:
+                    logger.info("[VoiceInput] drop idle background ASR: text=%r", text[:80])
+                    _latency_log(
+                        "voice_drop_not_addressed",
+                        text_len=len(text),
+                        reason=result.commit_reason or "",
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        gate_reason=gate_decision.reason,
+                        addressed=gate_decision.addressed,
+                        active_before=gate_decision.active_before,
+                        active_left_seconds=gate_decision.active_left_seconds,
+                    )
+                    _latency_log(
+                        "voice_gate_drop",
+                        text_len=len(text),
+                        asr_reason=result.commit_reason or "",
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        gate_reason=gate_decision.reason,
+                        addressed=gate_decision.addressed,
+                        active_before=gate_decision.active_before,
+                        active_left_seconds=gate_decision.active_left_seconds,
+                    )
+                    await threaded.clear_buffer()
+                    display.show_state("idle")
+                    return
+
+                display.show_recognized(text, result.commit_reason or "")
                 display.show_state("sending")
                 # 防止 VAD auto-commit 和手动 commit 重复发送同一句
-                now = _time.monotonic()
-                if not (result.text == _dedup["text"] and now - _dedup["ts"] < 1.5):
+                if not (text == _dedup["text"] and now - _dedup["ts"] < 1.5):
                     sent_started = _time.monotonic()
                     _latency_log(
                         "voice_final_before_send",
-                        text_len=len(result.text.strip()),
+                        text_len=len(text),
                         reason=result.commit_reason or "",
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        gate_reason=gate_decision.reason,
+                        addressed=gate_decision.addressed,
+                        active_before=gate_decision.active_before,
+                        active_left_seconds=gate_decision.active_left_seconds,
                     )
                     robot_mark_thinking()
                     matrix.session.add_input_signal(
-                        result.text,
-                        description=f"voice: {result.text[:50]}",
+                        text,
+                        description=f"voice: {text[:50]}",
                     )
                     logger.warning(
                         "[ReachyLatency] voice_final_sent text_len=%d reason=%s submit_elapsed=%.3fs",
-                        len(result.text.strip()),
+                        len(text),
                         result.commit_reason or "",
                         _time.monotonic() - sent_started,
                     )
                     _latency_log(
                         "voice_final_sent",
-                        text_len=len(result.text.strip()),
+                        text_len=len(text),
                         reason=result.commit_reason or "",
                         submit_elapsed=round(_time.monotonic() - sent_started, 3),
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        gate_reason=gate_decision.reason,
+                        addressed=gate_decision.addressed,
+                        active_before=gate_decision.active_before,
+                        active_left_seconds=gate_decision.active_left_seconds,
                     )
-                    _dedup["text"] = result.text
+                    _dedup["text"] = text
                     _dedup["ts"] = now
                 else:
                     _latency_log(
                         "voice_duplicate_dropped",
-                        text_len=len(result.text.strip()),
+                        text_len=len(text),
                         reason=result.commit_reason or "",
                         since_last=round(now - _dedup["ts"], 3),
+                        text_preview=text[:40],
                     )
                 display.show_sent()
                 display.show_state("idle")
                 display.show_footer()
             else:
-                display.show_partial(result.text)
+                text = result.text.strip()
+                now = _time.monotonic()
+                partial_decision = turn_gate.decide_partial(text, now)
+                if partial_decision.commit:
+                    logger.info(
+                        "[VoiceInput] commit idle unaddressed partial early: age=%.2fs text=%r",
+                        partial_decision.age_seconds,
+                        text[:80],
+                    )
+                    _latency_log(
+                        "voice_idle_partial_unaddressed_commit",
+                        age=partial_decision.age_seconds,
+                        text_len=len(text),
+                        text_preview=text[:40],
+                        gate_reason=partial_decision.reason,
+                        addressed=partial_decision.addressed,
+                        active_before=partial_decision.active_before,
+                        active_left_seconds=partial_decision.active_left_seconds,
+                    )
+                    await threaded.commit()
+                    return
+                display.show_partial(text)
 
         async def on_state_change(self, state: str):
             if "listening" in state.lower():
@@ -325,7 +543,55 @@ async def main(matrix: Matrix) -> None:
             pass
 
         async def save_batch(self, rec: Recognition, audio: np.ndarray):
-            pass
+            if audio is None or len(audio) <= 0:
+                return
+            flat = np.asarray(audio).reshape(-1)
+            if len(flat) <= 0:
+                return
+            rms, peak = _audio_rms_peak(flat)
+            text = (rec.text or "").strip()
+            reason = rec.commit_reason or ""
+            should_save = save_all_audio or (save_empty_audio and not text and rms >= debug_audio_min_rms)
+            if not should_save:
+                return
+            sample_rate = 16000
+            if debug_audio_max_seconds > 0:
+                max_samples = int(sample_rate * debug_audio_max_seconds)
+                if len(flat) > max_samples:
+                    flat = flat[-max_samples:]
+            safe_reason = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in reason)[:40]
+            filename = (
+                f"{time.strftime('%Y%m%d-%H%M%S')}-"
+                f"{rec.batch_id[:8]}-{safe_reason or 'asr'}.wav"
+            )
+            wav_path = debug_audio_dir / filename
+            try:
+                _write_debug_wav(wav_path, flat, sample_rate=sample_rate)
+                meta_path = wav_path.with_suffix(".json")
+                meta = {
+                    "batch_id": rec.batch_id,
+                    "commit_reason": reason,
+                    "text_len": len(text),
+                    "is_last": rec.is_last,
+                    "rms": round(rms, 2),
+                    "peak": peak,
+                    "sample_rate": sample_rate,
+                    "samples": int(len(flat)),
+                    "duration_seconds": round(len(flat) / sample_rate, 3),
+                    "created_at": time.time(),
+                }
+                meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+                _latency_log(
+                    "voice_debug_audio_saved",
+                    path=str(wav_path),
+                    reason=reason,
+                    text_len=len(text),
+                    rms=round(rms, 2),
+                    peak=peak,
+                    duration=round(len(flat) / sample_rate, 3),
+                )
+            except Exception as e:
+                _latency_log("voice_debug_audio_save_error", error=str(e)[:200])
 
     await threaded.set_callback(VoiceCallback())
 
@@ -340,11 +606,12 @@ async def main(matrix: Matrix) -> None:
     # 4. 持续循环：监听结束后自动重新开始监听
     poll_interval = float(os.environ.get("MOSS_VOICE_LOOP_POLL_SECONDS", "0.15"))
     restart_delay = float(os.environ.get("MOSS_VOICE_RESTART_DELAY_SECONDS", "0.08"))
-    speaking_tail = float(os.environ.get("MOSS_VOICE_ROBOT_SPEAKING_TAIL_SECONDS", "0.15"))
+    speaking_tail = float(os.environ.get("MOSS_VOICE_ROBOT_SPEAKING_TAIL_SECONDS", "0.8"))
     try:
         while True:
             await asyncio.sleep(poll_interval)
             try:
+                await _poll_control_file()
                 if robot_is_speaking(tail=speaking_tail):
                     await threaded.clear_buffer()
                     continue
