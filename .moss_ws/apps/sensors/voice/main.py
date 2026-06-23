@@ -57,6 +57,7 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_LOCAL_FALLBACK_ENABLED": "1",
         "MOSS_ASR_LOCAL_FALLBACK_DROP_UNSAFE": "1",
         "MOSS_ASR_LOCAL_FALLBACK_INITIAL_PROMPT": "",
+        "MOSS_ASR_LOCAL_FALLBACK_RESCUE_PROMPT": "小白你好",
         "MOSS_ASR_LOCAL_FALLBACK_MIN_RMS": "1800",
         "MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS": "0.9",
         "MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS": "0.85",

@@ -77,10 +77,55 @@ def _normalize_local_asr_text(text: str) -> str:
         "妳": "你",
         "線": "线",
         "夠": "够",
+        "號": "号",
+        "魚": "鱼",
+        "癢": "痒",
     }
     for source, target in replacements.items():
         normalized = normalized.replace(source, target)
     return normalized.replace(" ", "")
+
+
+def _edit_distance(a: str, b: str) -> int:
+    if a == b:
+        return 0
+    if not a:
+        return len(b)
+    if not b:
+        return len(a)
+    previous = list(range(len(b) + 1))
+    for index_a, char_a in enumerate(a, start=1):
+        current = [index_a]
+        for index_b, char_b in enumerate(b, start=1):
+            current.append(
+                min(
+                    previous[index_b] + 1,
+                    current[index_b - 1] + 1,
+                    previous[index_b - 1] + (char_a != char_b),
+                )
+            )
+        previous = current
+    return previous[-1]
+
+
+def _looks_like_short_wake_greeting(normalized: str) -> bool:
+    if not 3 <= len(normalized) <= 5:
+        return False
+    if "白" not in normalized or "好" not in normalized:
+        return False
+    return _edit_distance(normalized, "小白你好") <= 2
+
+
+def _looks_like_rescuable_short_wake_fragment(normalized: str) -> bool:
+    if not 2 <= len(normalized) <= 5:
+        return False
+    if any(blocked in normalized for blocked in ("酒", "明", "铃", "鈴")):
+        return False
+    if normalized in {"小一号", "小孩好"}:
+        return True
+    if "白" not in normalized:
+        return False
+    return any(token in normalized for token in ("你", "好", "号", "痒", "吧"))
 
 
 def _canonicalize_safe_local_fallback_text(text: str) -> str:
@@ -90,10 +135,14 @@ def _canonicalize_safe_local_fallback_text(text: str) -> str:
         "小番茗好": "小白你好",
         "小白米好": "小白你好",
         "小白糖": "小白你好",
+        "小白一号": "小白你好",
+        "老白你好": "小白你好",
     }
     if normalized in exact_homophones:
         return exact_homophones[normalized]
-    wake_homophones = ("想掰", "想把", "小拜", "小摆", "小百", "小班")
+    if _looks_like_short_wake_greeting(normalized):
+        return "小白你好"
+    wake_homophones = ("想掰", "想把", "想法", "小拜", "小摆", "小百", "小班")
     for wake in wake_homophones:
         if normalized.startswith(wake) and len(normalized) <= 16:
             rest = normalized[len(wake):]
@@ -686,6 +735,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._local_fallback_model = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_MODEL", "tiny").strip() or "tiny"
         self._local_fallback_cache_dir = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_CACHE_DIR", "").strip()
         self._local_fallback_initial_prompt = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_INITIAL_PROMPT", "").strip()
+        self._local_fallback_rescue_prompt = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_RESCUE_PROMPT", "").strip()
         self._local_fallback_min_rms = _float_env("MOSS_ASR_LOCAL_FALLBACK_MIN_RMS", 900.0)
         self._local_fallback_min_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS", 0.8)
         self._local_fallback_quiet_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS", 0.45)
@@ -947,6 +997,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 local_fallback_timeout=self._local_fallback_timeout_seconds,
                 local_fallback_trigger_max=self._local_fallback_trigger_max_seconds,
                 local_fallback_drop_unsafe=self._local_fallback_drop_unsafe,
+                local_fallback_rescue=bool(self._local_fallback_rescue_prompt),
             )
 
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
@@ -1565,6 +1616,56 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             text_len=len(text),
             text_preview=text[:40],
         )
+        if (
+            text
+            and self._local_fallback_rescue_prompt
+            and not _is_safe_local_fallback_text(text)
+            and _looks_like_rescuable_short_wake_fragment(_normalize_local_asr_text(text))
+        ):
+            rescue_started = time.time()
+            _latency_log(
+                "asr_local_fallback_rescue_start",
+                reason=reason,
+                text_len=len(text),
+                text_preview=text[:40],
+            )
+            try:
+                rescue_text = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _local_whisper_transcribe,
+                        flat,
+                        sample_rate=sample_rate,
+                        model_name=self._local_fallback_model,
+                        cache_dir=self._local_fallback_cache_dir,
+                        site_packages=self._local_fallback_site_packages,
+                        initial_prompt=self._local_fallback_rescue_prompt,
+                    ),
+                    timeout=max(0.1, self._local_fallback_timeout_seconds),
+                )
+            except Exception as e:
+                _latency_log(
+                    "asr_local_fallback_rescue_error",
+                    reason=reason,
+                    elapsed=round(time.time() - rescue_started, 3),
+                    error=str(e)[:200],
+                )
+            else:
+                _latency_log(
+                    "asr_local_fallback_rescue_done",
+                    reason=reason,
+                    elapsed=round(time.time() - rescue_started, 3),
+                    text_len=len(rescue_text),
+                    text_preview=rescue_text[:40],
+                )
+                if rescue_text and _is_safe_local_fallback_text(rescue_text):
+                    text = _canonicalize_safe_local_fallback_text(rescue_text)
+                else:
+                    _latency_log(
+                        "asr_local_fallback_rescue_reject",
+                        reason=reason,
+                        text_len=len(rescue_text),
+                        text_preview=rescue_text[:40],
+                    )
         if text and not _is_safe_local_fallback_text(text):
             _latency_log(
                 "asr_local_fallback_reject",
