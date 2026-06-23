@@ -59,11 +59,16 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_LOCAL_FALLBACK_INITIAL_PROMPT": "",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_PROMPT": "小白你好",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_MODEL": "base",
+        "MOSS_VOICE_ADDRESS_WORDS": "小白,蒋白",
         "MOSS_ASR_LOCAL_FALLBACK_MIN_RMS": "1800",
         "MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS": "0.9",
         "MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS": "0.85",
         "MOSS_ASR_LOCAL_FALLBACK_TIMEOUT_SECONDS": "3.0",
         "MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS": "4.2",
+        "MOSS_ASR_LONG_STABLE_TEXT_COMMIT_SECONDS": "1.8",
+        "MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS": "1.2",
+        "MOSS_ASR_LONG_EMPTY_TEXT_COMMIT_SECONDS": "1.8",
+        "MOSS_ASR_LONG_EMPTY_TEXT_MIN_QUIET_SECONDS": "1.2",
         "MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS": "0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR": "1.0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_MAX_SECONDS": "0",
@@ -89,6 +94,31 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         selected=mic_backend_selected,
         forced=force_defaults,
         applied=applied,
+    )
+
+
+def _log_reachy_daemon_status(robot_host: str) -> None:
+    try:
+        from urllib import request
+
+        with request.urlopen(f"http://{robot_host}:8000/api/daemon/status", timeout=2.0) as resp:
+            status = json.loads(resp.read().decode("utf-8"))
+    except Exception as error:
+        _latency_log(
+            "voice_reachy_daemon_status_error",
+            host=robot_host,
+            error=str(error)[:200],
+        )
+        return
+    _latency_log(
+        "voice_reachy_daemon_status",
+        host=robot_host,
+        state=status.get("state"),
+        error=status.get("error"),
+        media_released=status.get("media_released"),
+        no_media=status.get("no_media"),
+        wlan_ip=status.get("wlan_ip"),
+        version=status.get("version"),
     )
 
 
@@ -357,6 +387,8 @@ async def main(matrix: Matrix) -> None:
         console.print("[cyan]Voice mic backend: auto (Reachy robot mic, then local fallback)[/cyan]")
         sd_input = ReachyMicAudioInput(rate=16000, channels=1)
         mic_backend_selected = "auto_reachy_then_local"
+    if mic_backend_selected in {"reachy_robot", "auto_reachy_then_local"}:
+        _log_reachy_daemon_status(os.environ.get("REACHY_ROBOT_HOST", "reachy-mini.local"))
     _apply_reachy_mic_asr_defaults(mic_backend_selected)
     _latency_log(
         "voice_mic_backend_selected",

@@ -87,6 +87,26 @@ class _CommitOnQuietVad:
         return False
 
 
+def test_empty_text_commit_policy_keeps_short_fast_and_long_patient(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", "0.75")
+    monkeypatch.setenv("MOSS_ASR_LONG_EMPTY_TEXT_COMMIT_SECONDS", "1.8")
+    monkeypatch.setenv("MOSS_ASR_STABLE_SHORT_MIN_QUIET_SECONDS", "0.35")
+    monkeypatch.setenv("MOSS_ASR_LONG_EMPTY_TEXT_MIN_QUIET_SECONDS", "1.2")
+
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=_Callback(),
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(_Clock()),
+    )
+
+    assert state._empty_text_commit_policy("小白你好") == (0.75, "short", 0.35)
+    assert state._empty_text_commit_policy("小白你好。") == (0.75, "punct", 0.25)
+    assert state._empty_text_commit_policy("小白我现在要说一个比较长的问题") == (1.8, "long", 1.2)
+    assert state._empty_text_commit_policy("小白我现在要说一个比较长的问题。") == (1.8, "long", 1.2)
+
+
 @pytest.mark.asyncio
 async def test_energy_vad_defers_empty_commit_for_local_fallback(monkeypatch) -> None:
     monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")

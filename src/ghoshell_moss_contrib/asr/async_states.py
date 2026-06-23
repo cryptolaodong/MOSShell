@@ -135,6 +135,8 @@ def _looks_like_rescuable_wake_second_pass(normalized: str) -> bool:
         return False
     if any(blocked in normalized for blocked in ("酒", "明", "铃", "鈴")):
         return False
+    if normalized in {"小雷"}:
+        return True
     if not normalized.startswith(("小", "想", "叫", "老")):
         return False
     return any(token in normalized for token in ("你好", "好", "号", "號"))
@@ -710,6 +712,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._short_text_max_chars = _int_env("MOSS_ASR_SHORT_TEXT_MAX_CHARS", 8)
         self._stable_punct_commit_seconds = _float_env("MOSS_ASR_STABLE_PUNCT_COMMIT_SECONDS", 0.25)
         self._empty_text_commit_seconds = _float_env("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", 0.75)
+        self._long_empty_text_commit_seconds = _float_env(
+            "MOSS_ASR_LONG_EMPTY_TEXT_COMMIT_SECONDS",
+            max(self._empty_text_commit_seconds, self._long_stable_text_commit_seconds),
+        )
         self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 0.8)
         self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 0.35)
         self._empty_final_wait_seconds = _float_env("MOSS_ASR_EMPTY_FINAL_WAIT_SECONDS", 0.35)
@@ -722,6 +728,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._stable_short_min_quiet_seconds = _float_env(
             "MOSS_ASR_STABLE_SHORT_MIN_QUIET_SECONDS",
             min(self._stable_text_min_quiet_seconds, 0.35),
+        )
+        self._long_empty_text_min_quiet_seconds = _float_env(
+            "MOSS_ASR_LONG_EMPTY_TEXT_MIN_QUIET_SECONDS",
+            max(self._stable_text_min_quiet_seconds, self._long_stable_text_commit_seconds),
         )
         self._prespeech_batch_max_seconds = _float_env("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", 3.0)
         self._speech_no_text_max_seconds = _float_env("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", 5.5)
@@ -927,9 +937,9 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             self._logger.warning(
                 "[ReachyLatency] asr_tuning energy_hold=%s speech_rms=%s silence_rms=%s "
                 "short_stable=%.2fs long_stable=%.2fs "
-                "short_max=%d punct=%.2fs empty=%.2fs audio_idle=%.2fs final_wait=%.2fs "
+                "short_max=%d punct=%.2fs empty=%.2fs long_empty=%.2fs audio_idle=%.2fs final_wait=%.2fs "
                 "empty_final_wait=%.2fs server_vad=%dms stable_quiet=%.2fs "
-                "punct_quiet=%.2fs short_quiet=%.2fs prespeech_max=%.2fs "
+                "punct_quiet=%.2fs short_quiet=%.2fs long_empty_quiet=%.2fs prespeech_max=%.2fs "
                 "speech_no_text_max=%.2fs speech_no_text_quiet=%.2fs "
                 "speech_no_text_action=%s hard=%.2fx empty_retry=%s retry_min_rms=%.1f "
                 "input_gate=%s gate_rms=%.1f gate_pre=%.2fs gate_tail=%.2fs "
@@ -943,6 +953,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._short_text_max_chars,
                 self._stable_punct_commit_seconds,
                 self._empty_text_commit_seconds,
+                self._long_empty_text_commit_seconds,
                 self._audio_idle_commit_seconds,
                 self._final_wait_seconds,
                 self._empty_final_wait_seconds,
@@ -950,6 +961,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._stable_text_min_quiet_seconds,
                 self._stable_punct_min_quiet_seconds,
                 self._stable_short_min_quiet_seconds,
+                self._long_empty_text_min_quiet_seconds,
                 self._prespeech_batch_max_seconds,
                 self._speech_no_text_max_seconds,
                 self._speech_no_text_min_quiet_seconds,
@@ -981,6 +993,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 short_max=self._short_text_max_chars,
                 punct=self._stable_punct_commit_seconds,
                 empty=self._empty_text_commit_seconds,
+                long_empty=self._long_empty_text_commit_seconds,
                 audio_idle=self._audio_idle_commit_seconds,
                 final_wait=self._final_wait_seconds,
                 empty_final_wait=self._empty_final_wait_seconds,
@@ -988,6 +1001,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 stable_quiet=self._stable_text_min_quiet_seconds,
                 stable_punct_quiet=self._stable_punct_min_quiet_seconds,
                 stable_short_quiet=self._stable_short_min_quiet_seconds,
+                long_empty_quiet=self._long_empty_text_min_quiet_seconds,
                 prespeech_max=self._prespeech_batch_max_seconds,
                 speech_no_text_max=self._speech_no_text_max_seconds,
                 speech_no_text_quiet=self._speech_no_text_min_quiet_seconds,
@@ -1079,6 +1093,14 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         )
         if self._current_batch:
             await self._current_batch.commit()
+
+    def _empty_text_commit_policy(self, text: str) -> tuple[float, str, float]:
+        stripped = text.strip()
+        if len(stripped) <= self._short_text_max_chars:
+            if _ends_terminal_punctuation(stripped):
+                return self._empty_text_commit_seconds, "punct", self._stable_punct_min_quiet_seconds
+            return self._empty_text_commit_seconds, "short", self._stable_short_min_quiet_seconds
+        return self._long_empty_text_commit_seconds, "long", self._long_empty_text_min_quiet_seconds
 
     def _local_fallback_empty_text_window(
         self,
@@ -1413,7 +1435,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             if not self._committed and self._last_text_change_time > 0:
                 stable_elapsed = time.time() - self._last_text_change_time
                 text = self._last_non_empty_text
-                if _ends_terminal_punctuation(text):
+                if len(text.strip()) <= self._short_text_max_chars and _ends_terminal_punctuation(text):
                     threshold = self._stable_punct_commit_seconds
                     threshold_kind = "punct"
                     min_quiet_seconds = self._stable_punct_min_quiet_seconds
@@ -1454,11 +1476,35 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             # ASR 空文本超时检测：如果已经识别到过文字，且超过配置时间没有新的非空结果，自动提交
             if not self._committed and self._last_non_empty_recognition_time > 0:
                 elapsed = time.time() - self._last_non_empty_recognition_time
-                if elapsed >= self._empty_text_commit_seconds:
-                    self._logger.info(
-                        f"ASR empty text timeout ({elapsed:.1f}s since last non-empty result), auto-committing"
+                empty_threshold, empty_kind, min_quiet_seconds = self._empty_text_commit_policy(
+                    self._last_non_empty_text,
+                )
+                if elapsed >= empty_threshold:
+                    quiet_elapsed = (
+                        time.time() - last_loud_audio_time
+                        if last_loud_audio_time > 0
+                        else float("inf")
                     )
-                    await self._do_auto_commit("empty_text_timeout")
+                    if quiet_elapsed < min_quiet_seconds:
+                        await asyncio.sleep(0.01)
+                        continue
+                    self._logger.info(
+                        "ASR empty text timeout (%.1fs, threshold=%.1fs kind=%s, quiet=%.1fs min_quiet=%.1fs), auto-committing",
+                        elapsed,
+                        empty_threshold,
+                        empty_kind,
+                        quiet_elapsed,
+                        min_quiet_seconds,
+                    )
+                    await self._do_auto_commit(
+                        "empty_text_timeout",
+                        empty_kind=empty_kind,
+                        threshold=round(empty_threshold, 3),
+                        quiet=round(quiet_elapsed, 3)
+                        if quiet_elapsed != float("inf")
+                        else None,
+                        min_quiet=round(min_quiet_seconds, 3),
+                    )
 
             # 检查是否已提交
             if self._committed:

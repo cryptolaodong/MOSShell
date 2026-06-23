@@ -6,6 +6,8 @@ from ghoshell_moss.contracts.speech import AudioFormat
 from ghoshell_moss.core.speech.base_player import BaseAudioStreamPlayer
 from reachy_mini import ReachyMini
 
+from .speaking_gate import clear_speaking, mark_speech_pending, mark_speaking_for
+
 
 def _connect_without_releasing_media(**kwargs) -> ReachyMini:
     """Create a no-media SDK client without releasing daemon-owned mic/camera."""
@@ -96,6 +98,32 @@ class ReachyMiniStreamPlayer(BaseAudioStreamPlayer):
         self.mini.media.push_audio_sample(data)
 
 
+def _attach_speaking_gate_to_fallback_player(player: BaseAudioStreamPlayer, logger: LoggerItf) -> None:
+    original_clear = player.clear
+
+    def _on_play(audio_data: np.ndarray) -> None:
+        try:
+            now = time.time()
+            estimated_left = max(0.0, getattr(player, "_estimated_end_time", now) - now)
+            samples = int(getattr(audio_data, "shape", [len(audio_data)])[0])
+            duration = samples / max(1, int(getattr(player, "sample_rate", 24000) or 24000))
+            mark_speaking_for(max(duration, estimated_left), tail=1.5)
+        except Exception as e:
+            logger.debug("[ReachyMiniAudioPlayer] fallback speaking gate mark failed: %s", e)
+
+    async def _finish_stream() -> None:
+        mark_speaking_for(0.0, tail=1.5)
+
+    async def _clear() -> None:
+        clear_speaking()
+        await original_clear()
+
+    player.on_play(_on_play)
+    player.mark_pending = mark_speech_pending  # type: ignore[attr-defined]
+    player.finish_stream = _finish_stream  # type: ignore[attr-defined]
+    player.clear = _clear  # type: ignore[method-assign]
+
+
 from ghoshell_container import IoCContainer, Provider
 from ghoshell_moss.contracts.speech import StreamAudioPlayer
 
@@ -143,4 +171,6 @@ class ReachyMiniStreamPlayerProvider(Provider[StreamAudioPlayer]):
         # Last resort: local miniaudio
         logger.error('[ReachyMiniAudioPlayer] All robot audio methods failed. Using local miniaudio.')
         from ghoshell_moss.host.speech.player.miniaudio_player import MiniAudioStreamPlayer
-        return MiniAudioStreamPlayer(sample_rate=24000, channels=1, logger=logger, safety_delay=0.5)
+        player = MiniAudioStreamPlayer(sample_rate=24000, channels=1, logger=logger, safety_delay=0.5)
+        _attach_speaking_gate_to_fallback_player(player, logger)
+        return player

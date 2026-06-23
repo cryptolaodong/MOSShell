@@ -76,6 +76,19 @@ class ReachyMicAudioInput:
             status = {}
             try:
                 status = self._fetch_daemon_status(timeout=3)
+                print(
+                    "[ReachyMicAudioInput] daemon status "
+                    f"state={status.get('state')} media_released={status.get('media_released')} "
+                    f"no_media={status.get('no_media')} error={status.get('error')}",
+                    flush=True,
+                )
+                self._logger.warning(
+                    "ReachyMicAudioInput: daemon status state=%s media_released=%s no_media=%s error=%s",
+                    status.get("state"),
+                    status.get("media_released"),
+                    status.get("no_media"),
+                    status.get("error"),
+                )
                 if status.get("media_released"):
                     print("[ReachyMicAudioInput] acquiring daemon media before WebRTC...", flush=True)
                     self._acquire_daemon_media(timeout=10)
@@ -183,6 +196,24 @@ class ReachyMicAudioInput:
                 self._logger.debug("ReachyMicAudioInput media status check failed: %s", status_error)
                 return
             if not status.get("media_released"):
+                if force:
+                    self._logger.warning(
+                        "ReachyMicAudioInput: forcing local media reopen reason=%s "
+                        "daemon_state=%s daemon_error=%s media_released=%s",
+                        reason,
+                        status.get("state"),
+                        status.get("error"),
+                        status.get("media_released"),
+                    )
+                    print(
+                        "[ReachyMicAudioInput] forcing local media reopen "
+                        f"reason={reason} daemon_state={status.get('state')} "
+                        f"daemon_error={status.get('error')}",
+                        flush=True,
+                    )
+                    if await self._wait_for_producer(self._signalling_host, timeout=4):
+                        self._open_media(reason=f"recover:{reason}:force")
+                    return
                 return
             self._logger.warning(
                 "ReachyMicAudioInput: daemon media was released; reacquiring reason=%s",
