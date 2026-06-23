@@ -10,6 +10,7 @@ from ghoshell_moss.contracts import SystemPrompter
 from pydantic_ai import Agent, RunContext
 from pydantic_ai.models import Model
 from pydantic_ai.providers import Provider
+from pydantic_ai.settings import ModelSettings
 from pydantic_ai.models.anthropic import AnthropicModel, AnthropicModelSettings
 from pydantic_ai.providers.anthropic import AnthropicProvider
 from pydantic_ai.models.openai import OpenAIModel
@@ -19,6 +20,20 @@ if TYPE_CHECKING:
     from ._runtime import Atom
 
 __all__ = ["AtomMeta"]
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
 
 
 class AtomMeta(GhostMeta):
@@ -121,12 +136,29 @@ class AtomMeta(GhostMeta):
             deepseek_base = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
             if deepseek_key:
                 import httpx
+                from openai import AsyncOpenAI
+                llm_timeout = _env_float("MOSS_LLM_TIMEOUT_SECONDS", 6.0)
+                http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(
+                        llm_timeout,
+                        connect=max(0.5, min(3.0, llm_timeout)),
+                    ),
+                )
                 model = OpenAIModel(
                     model_name=deepseek_model,
+                    settings=ModelSettings(
+                        max_tokens=_env_int("MOSS_LLM_MAX_TOKENS", 220),
+                        temperature=_env_float("MOSS_LLM_TEMPERATURE", 0.4),
+                        timeout=llm_timeout,
+                    ),
                     provider=OpenAIProvider(
-                        base_url=deepseek_base,
-                        api_key=deepseek_key,
-                        http_client=httpx.AsyncClient(timeout=60.0),
+                        openai_client=AsyncOpenAI(
+                            base_url=deepseek_base,
+                            api_key=deepseek_key,
+                            http_client=http_client,
+                            timeout=llm_timeout,
+                            max_retries=_env_int("MOSS_LLM_MAX_RETRIES", 0),
+                        ),
                     ),
                 )
             else:

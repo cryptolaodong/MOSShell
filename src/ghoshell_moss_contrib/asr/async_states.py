@@ -429,11 +429,13 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._last_non_empty_text: str = ""
         self._last_text_change_time: float = 0.0
         self._commit_reason: str = ""
-        self._stable_text_commit_seconds = _float_env("MOSS_ASR_STABLE_TEXT_COMMIT_SECONDS", 1.0)
-        self._stable_punct_commit_seconds = _float_env("MOSS_ASR_STABLE_PUNCT_COMMIT_SECONDS", 0.45)
-        self._empty_text_commit_seconds = _float_env("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", 1.0)
-        self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 1.0)
-        self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 1.2)
+        self._stable_text_commit_seconds = _float_env("MOSS_ASR_STABLE_TEXT_COMMIT_SECONDS", 0.65)
+        self._stable_punct_commit_seconds = _float_env("MOSS_ASR_STABLE_PUNCT_COMMIT_SECONDS", 0.25)
+        self._empty_text_commit_seconds = _float_env("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", 0.65)
+        self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 0.55)
+        self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 0.55)
+        self._batch_started_at = 0.0
+        self._committed_at = 0.0
 
     def name(self) -> AsyncListenerStateName:
         return AsyncListenerStateName.PDT_LISTENING
@@ -450,6 +452,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._last_non_empty_text = ""
         self._last_text_change_time = 0.0
         self._commit_reason = ""
+        self._batch_started_at = time.time()
+        self._committed_at = 0.0
 
         try:
             # 发送初始空识别结果（保持与现有行为兼容）
@@ -641,7 +645,13 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             return
         self._committed = True
         self._commit_reason = reason
-        self._logger.info(f"Auto-commit triggered by: {reason}")
+        self._committed_at = time.time()
+        self._logger.warning(
+            "[ReachyLatency] asr_auto_commit reason=%s elapsed=%.2fs stable_text=%r",
+            reason,
+            self._committed_at - self._batch_started_at if self._batch_started_at else 0.0,
+            self._last_non_empty_text[:80],
+        )
         if self._current_batch:
             await self._current_batch.commit()
 
@@ -725,6 +735,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             # 检查是否已提交
             if self._committed:
                 # 等待批次完成或超时
+                wait_started = time.time()
                 try:
                     await asyncio.wait_for(
                         self._current_batch.wait_until_done(),
@@ -735,6 +746,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         "PTT wait_until_done timed out after %.1fs; closing with last recognition",
                         self._final_wait_seconds,
                     )
+                self._logger.warning(
+                    "[ReachyLatency] asr_final_wait done elapsed=%.2fs total=%.2fs reason=%s",
+                    time.time() - wait_started,
+                    time.time() - self._batch_started_at if self._batch_started_at else 0.0,
+                    self._commit_reason or "manual",
+                )
                 break
 
             # 短暂休眠以避免忙等待

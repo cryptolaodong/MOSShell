@@ -4,7 +4,11 @@ import contextlib
 import orjson as json
 import logging
 import os
+import shutil
+import subprocess
+import wave
 from collections import deque
+from pathlib import Path
 from typing import Any, Literal, Optional, AsyncIterator, ClassVar
 
 import numpy as np
@@ -40,6 +44,28 @@ __all__ = [
     "VolcengineTTSBatch",
     "VolcengineTTSConf",
 ]
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 ChineseVoiceEmotion = Literal[
     "happy",  # 开心
@@ -253,6 +279,30 @@ class VolcengineTTSConf(BaseModel):
     url: str = Field(
         default="wss://openspeech.bytedance.com/api/v3/tts/bidirection",
         description="火山的流式语音模型的地址",
+    )
+    connect_open_timeout: float = Field(
+        default_factory=lambda: _env_float("MOSS_TTS_CONNECT_OPEN_TIMEOUT", 2.5),
+        description="WebSocket opening handshake timeout. Keep short for realtime voice.",
+    )
+    connect_attempts: int = Field(
+        default_factory=lambda: max(1, _env_int("MOSS_TTS_CONNECT_ATTEMPTS", 2)),
+        description="How many quick connection attempts to try before giving up this batch.",
+    )
+    connect_retry_delay: float = Field(
+        default_factory=lambda: max(0.0, _env_float("MOSS_TTS_CONNECT_RETRY_DELAY", 0.15)),
+        description="Delay between quick TTS connection retries.",
+    )
+    macos_say_fallback: bool = Field(
+        default_factory=lambda: _env_bool("MOSS_TTS_MACOS_SAY_FALLBACK", True),
+        description="Use local macOS say as last-resort TTS when cloud TTS cannot connect.",
+    )
+    macos_say_voice: str = Field(
+        default_factory=lambda: os.environ.get("MOSS_TTS_MACOS_SAY_VOICE", ""),
+        description="Optional macOS say voice for fallback synthesis.",
+    )
+    macos_say_timeout: float = Field(
+        default_factory=lambda: max(1.0, _env_float("MOSS_TTS_MACOS_SAY_TIMEOUT_SECONDS", 8.0)),
+        description="Timeout for local macOS say fallback synthesis.",
     )
 
     speakers: dict[str, SpeakerConf] = Field(
@@ -627,32 +677,67 @@ class VolcengineTTS(TTS):
             speaker = batch.speaker()
             # 当前火山的 resource id
             resource_id = speaker.resource_id or self._conf.resource_id
-            connection_id = unique_id()
-            header = self._conf.gen_header(connection_id=connection_id, resource_id=resource_id)
             url = self._conf.url
-            # 创建初始连接.
-            self.logger.info("%s prepare to connect to %s with header %s", self._log_prefix, url, header)
-            async with connect(url, additional_headers=header) as ws:
-                # 建连确认.
-                await start_connection(ws)
-                self.logger.debug("%s start connection %s", self._log_prefix, connection_id)
-                # 接受确认的事件. 完成握手.
-                await wait_for_event(
-                    ws,
-                    MsgType.FullServerResponse,
-                    EventType.ConnectionStarted,
-                )
-                self.logger.debug("%s connection %s started", self._log_prefix, connection_id)
+            self.logger.info(
+                "%s prepare to connect to %s attempts=%d open_timeout=%.1fs",
+                self._log_prefix,
+                url,
+                self._conf.connect_attempts,
+                self._conf.connect_open_timeout,
+            )
+            for attempt in range(1, self._conf.connect_attempts + 1):
+                connection_id = unique_id()
+                header = self._conf.gen_header(connection_id=connection_id, resource_id=resource_id)
+                try:
+                    self.logger.info(
+                        "%s TTS connect attempt %d/%d connection_id=%s",
+                        self._log_prefix,
+                        attempt,
+                        self._conf.connect_attempts,
+                        connection_id,
+                    )
+                    async with connect(
+                        url,
+                        additional_headers=header,
+                        open_timeout=self._conf.connect_open_timeout,
+                    ) as ws:
+                        # 建连确认.
+                        await start_connection(ws)
+                        self.logger.debug("%s start connection %s", self._log_prefix, connection_id)
+                        # 接受确认的事件. 完成握手.
+                        await wait_for_event(
+                            ws,
+                            MsgType.FullServerResponse,
+                            EventType.ConnectionStarted,
+                        )
+                        self.logger.debug("%s connection %s started", self._log_prefix, connection_id)
 
-                # 消费完第一个 batch.
-                goon = await self._consume_batch_in_connection(batch, connection=ws, current_resource_id=resource_id)
-                # 消费后续的 batch.
-                if goon:
-                    await self._consume_pending_batches(connection=ws, resource_id=resource_id)
-                # 全部结束了, 就退出来. 等待外层继续调度.
-                self.logger.info("%s consume batch loop %s is done", self._log_prefix, connection_id)
-                # 发送退出信号. 不等待握手了.
-                await finish_connection(ws)
+                        # 消费完第一个 batch.
+                        goon = await self._consume_batch_in_connection(
+                            batch,
+                            connection=ws,
+                            current_resource_id=resource_id,
+                        )
+                        # 消费后续的 batch.
+                        if goon:
+                            await self._consume_pending_batches(connection=ws, resource_id=resource_id)
+                        # 全部结束了, 就退出来. 等待外层继续调度.
+                        self.logger.info("%s consume batch loop %s is done", self._log_prefix, connection_id)
+                        # 发送退出信号. 不等待握手了.
+                        await finish_connection(ws)
+                        return
+                except TimeoutError:
+                    if attempt >= self._conf.connect_attempts:
+                        if await self._fallback_to_macos_say(batch, reason="connect_timeout"):
+                            return
+                        raise
+                    self.logger.warning(
+                        "%s TTS connect timeout on attempt %d/%d; retrying",
+                        self._log_prefix,
+                        attempt,
+                        self._conf.connect_attempts,
+                    )
+                    await asyncio.sleep(self._conf.connect_retry_delay)
 
         except ConnectionClosedOK:
             self.logger.info("%s TTS connection closed ok", self._log_prefix)
@@ -664,6 +749,78 @@ class VolcengineTTS(TTS):
             self.logger.exception("%s Consume batch loop failed: %s", self._log_prefix, e)
         finally:
             self.logger.info("%s consuming batch loop done", self._log_prefix)
+
+    async def _fallback_to_macos_say(self, batch: VolcengineTTSBatch, *, reason: str) -> bool:
+        if not self._conf.macos_say_fallback:
+            return False
+        say_path = shutil.which("say")
+        if not say_path:
+            return False
+        await batch.wait_started()
+        text = batch.text_buffer.strip()
+        if not text:
+            self.logger.warning("%s macOS say fallback skipped: empty text", self._log_prefix)
+            return False
+        try:
+            started_at = asyncio.get_running_loop().time()
+            audio = await asyncio.to_thread(self._synthesize_with_macos_say, say_path, text, batch)
+            if batch.callback:
+                batch.callback(audio)
+            await batch.append(audio)
+            await batch.close()
+            self.logger.warning(
+                "%s [ReachyLatency] tts_macos_say_fallback reason=%s elapsed=%.2fs chars=%d samples=%d",
+                self._log_prefix,
+                reason,
+                asyncio.get_running_loop().time() - started_at,
+                len(text),
+                len(audio),
+            )
+            return True
+        except Exception as exc:
+            self.logger.exception("%s macOS say fallback failed: %s", self._log_prefix, exc)
+            return False
+
+    def _synthesize_with_macos_say(
+            self,
+            say_path: str,
+            text: str,
+            batch: VolcengineTTSBatch,
+    ) -> np.ndarray:
+        workspace = Path(os.environ.get("MOSS_WORKSPACE", ".moss_ws"))
+        output_dir = workspace / "runtime" / "tts_fallback"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        wav_path = output_dir / f"macos-say-{batch.batch_id()}.wav"
+        cmd = [
+            say_path,
+            "--file-format=WAVE",
+            f"--data-format=LEI16@{batch.sample_rate}",
+            "-o",
+            str(wav_path),
+        ]
+        if self._conf.macos_say_voice:
+            cmd.extend(["-v", self._conf.macos_say_voice])
+        cmd.append(text)
+        subprocess.run(
+            cmd,
+            check=True,
+            timeout=self._conf.macos_say_timeout,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+        with wave.open(str(wav_path), "rb") as wav:
+            channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
+            sample_rate = wav.getframerate()
+            frames = wav.readframes(wav.getnframes())
+        if sample_width != 2:
+            raise RuntimeError(f"unsupported macOS say sample width: {sample_width}")
+        if sample_rate != batch.sample_rate:
+            raise RuntimeError(f"unexpected macOS say sample rate: {sample_rate}")
+        audio = np.frombuffer(frames, dtype=np.int16).copy()
+        if channels > 1:
+            audio = audio.reshape(-1, channels).mean(axis=1).astype(np.int16)
+        return audio
 
     async def _consume_batch_in_connection(
             self,

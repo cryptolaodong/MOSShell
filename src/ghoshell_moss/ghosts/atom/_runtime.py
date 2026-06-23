@@ -1,4 +1,5 @@
 import os
+import time
 from typing import AsyncIterator, TYPE_CHECKING
 from typing_extensions import Self
 from ghoshell_moss.core.blueprint.ghost import Ghost, GhostMeta
@@ -44,6 +45,13 @@ class Atom(Ghost):
             "no",
             "off",
         }
+        self._fallback_on_llm_error = os.environ.get("MOSS_LLM_FALLBACK_ON_ERROR", "1").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }
+        self._llm_fallback_text = os.environ.get("MOSS_LLM_FALLBACK_TEXT", "我卡了一下，请再说一遍。")
         # Load persisted history from session storage
         self._load_history()
 
@@ -143,6 +151,15 @@ class Atom(Ghost):
         moment = articulator.moment
         request = self.to_model_request(moment)
         history = self.model_history()
+        prompt_chars = len(self.system_prompt())
+        started_at = time.monotonic()
+        first_token_seen = False
+        total_chars = 0
+        self._logger.info(
+            "[ReachyLatency] llm_request_start history_turns=%d prompt_chars=%d",
+            len(history),
+            prompt_chars,
+        )
 
         try:
             async with self._agent.run_stream(
@@ -151,7 +168,20 @@ class Atom(Ghost):
                 deps=self._container,
             ) as stream:
                 async for text in stream.stream_text(delta=True):
+                    if text:
+                        total_chars += len(text)
+                    if text and text.strip() and not first_token_seen:
+                        first_token_seen = True
+                        self._logger.info(
+                            "[ReachyLatency] llm_first_token elapsed=%.2fs",
+                            time.monotonic() - started_at,
+                        )
                     yield text
+                self._logger.info(
+                    "[ReachyLatency] llm_stream_done elapsed=%.2fs chars=%d",
+                    time.monotonic() - started_at,
+                    total_chars,
+                )
                 self.save_model_request(moment, stream.response)
         except AssertionError as e:
             # pydantic_ai 1.105.0 bug: TextContent in error retry path
@@ -163,7 +193,20 @@ class Atom(Ghost):
                 deps=self._container,
             ) as stream:
                 async for text in stream.stream_text(delta=True):
+                    if text:
+                        total_chars += len(text)
+                    if text and text.strip() and not first_token_seen:
+                        first_token_seen = True
+                        self._logger.info(
+                            "[ReachyLatency] llm_first_token_retry elapsed=%.2fs",
+                            time.monotonic() - started_at,
+                        )
                     yield text
+                self._logger.info(
+                    "[ReachyLatency] llm_stream_done_retry elapsed=%.2fs chars=%d",
+                    time.monotonic() - started_at,
+                    total_chars,
+                )
                 self.save_model_request(moment, stream.response)
         except Exception as e:
             error_text = str(e)
@@ -171,6 +214,16 @@ class Atom(Ghost):
                 "Invalid assistant message" not in error_text
                 and "content or tool_calls must be set" not in error_text
             ):
+                if self._fallback_on_llm_error:
+                    self._logger.exception(
+                        "[ReachyLatency] llm_failed elapsed=%.2fs chars=%d fallback=%s",
+                        time.monotonic() - started_at,
+                        total_chars,
+                        total_chars == 0,
+                    )
+                    if total_chars == 0:
+                        yield self._llm_fallback_text
+                    return
                 raise
             self._disable_history("model rejected assistant history", e)
             async with self._agent.run_stream(
@@ -179,7 +232,20 @@ class Atom(Ghost):
                 deps=self._container,
             ) as stream:
                 async for text in stream.stream_text(delta=True):
+                    if text:
+                        total_chars += len(text)
+                    if text and text.strip() and not first_token_seen:
+                        first_token_seen = True
+                        self._logger.info(
+                            "[ReachyLatency] llm_first_token_history_retry elapsed=%.2fs",
+                            time.monotonic() - started_at,
+                        )
                     yield text
+                self._logger.info(
+                    "[ReachyLatency] llm_stream_done_history_retry elapsed=%.2fs chars=%d",
+                    time.monotonic() - started_at,
+                    total_chars,
+                )
                 self.save_model_request(moment, stream.response)
 
     # ── 生命周期 ──────────────────────────────────

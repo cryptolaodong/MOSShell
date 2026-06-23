@@ -254,10 +254,17 @@ async def main(matrix: Matrix) -> None:
                 # 防止 VAD auto-commit 和手动 commit 重复发送同一句
                 now = _time.monotonic()
                 if not (result.text == _dedup["text"] and now - _dedup["ts"] < 1.5):
+                    sent_started = _time.monotonic()
                     robot_mark_thinking()
                     matrix.session.add_input_signal(
                         result.text,
                         description=f"voice: {result.text[:50]}",
+                    )
+                    logger.warning(
+                        "[ReachyLatency] voice_final_sent text_len=%d reason=%s submit_elapsed=%.3fs",
+                        len(result.text.strip()),
+                        result.commit_reason or "",
+                        _time.monotonic() - sent_started,
                     )
                     _dedup["text"] = result.text
                     _dedup["ts"] = now

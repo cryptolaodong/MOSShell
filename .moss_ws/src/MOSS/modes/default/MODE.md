@@ -2,9 +2,8 @@
 # Mode 元数据（YAML frontmatter）。
 # 以下字段由 moss modes create 自动填充，也可以手动编辑。
 apps:
-  - '*/*'           # 允许的 app 白名单。'*/*' = 全部公开 app
-                    #   group/* = 某个 group 下所有 app
-                    #   _ 前缀（如 _private/app）= 禁止访问
+  - 'bodies/reachymini'  # 语音机器人常驻模式只暴露必要 app，减少每轮 LLM 上下文。
+  - 'sensors/voice'
 bringup_apps:       # 启动时自动 bringup 的 app 列表
   - 'bodies/reachymini'
   - 'sensors/voice'

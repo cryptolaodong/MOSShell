@@ -75,27 +75,27 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         self.audio_type = AudioFormat.PCM_S16LE
         self.logger = logger or logging.getLogger("moss")
         self._safety_delay = (
-            _env_float("MOSS_REACHY_UPLOAD_SAFETY_DELAY", 0.08)
+            _env_float("MOSS_REACHY_UPLOAD_SAFETY_DELAY", 0.05)
             if safety_delay is None
             else max(0.0, safety_delay)
         )
         self._min_play_seconds = (
-            _env_float("MOSS_REACHY_UPLOAD_MIN_PLAY_SECONDS", 1.8)
+            _env_float("MOSS_REACHY_UPLOAD_MIN_PLAY_SECONDS", 1.4)
             if min_play_seconds is None
             else max(0.0, min_play_seconds)
         )
         self._max_buffer_wait = (
-            _env_float("MOSS_REACHY_UPLOAD_MAX_BUFFER_WAIT", 0.9)
+            _env_float("MOSS_REACHY_UPLOAD_MAX_BUFFER_WAIT", 0.65)
             if max_buffer_wait is None
             else max(0.0, max_buffer_wait)
         )
         self._initial_min_play_seconds = (
-            _env_float("MOSS_REACHY_UPLOAD_INITIAL_MIN_PLAY_SECONDS", 1.2)
+            _env_float("MOSS_REACHY_UPLOAD_INITIAL_MIN_PLAY_SECONDS", 0.65)
             if initial_min_play_seconds is None
             else max(0.0, initial_min_play_seconds)
         )
         self._initial_max_buffer_wait = (
-            _env_float("MOSS_REACHY_UPLOAD_INITIAL_MAX_BUFFER_WAIT", 0.45)
+            _env_float("MOSS_REACHY_UPLOAD_INITIAL_MAX_BUFFER_WAIT", 0.18)
             if initial_max_buffer_wait is None
             else max(0.0, initial_max_buffer_wait)
         )
@@ -111,6 +111,8 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         self._closed = False
         self._current_upload_id: Optional[str] = None
         self._played_segment_count = 0
+        self._pending_started_at = 0.0
+        self._first_audio_logged = False
 
         self._worker_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -149,6 +151,8 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         self._estimated_end_time = time.time()
         self._next_play_monotonic = time.monotonic()
         self._played_segment_count = 0
+        self._pending_started_at = 0.0
+        self._first_audio_logged = False
         self._play_done_event.set()
         self.logger.info("%s cleared", self._log_prefix)
 
@@ -194,6 +198,19 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
 
         if self._play_done_event.is_set():
             self._play_done_event.clear()
+        if not self._first_audio_logged:
+            self._first_audio_logged = True
+            since_pending = (
+                time.monotonic() - self._pending_started_at
+                if self._pending_started_at
+                else 0.0
+            )
+            self.logger.info(
+                "%s [ReachyLatency] tts_first_audio_to_player duration=%.2fs since_pending=%.2fs",
+                self._log_prefix,
+                duration,
+                since_pending,
+            )
 
         current_time = time.time()
         if current_time > self._estimated_end_time:
@@ -225,6 +242,8 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         return self._closed
 
     def mark_pending(self) -> None:
+        self._pending_started_at = time.monotonic()
+        self._first_audio_logged = False
         mark_speech_pending()
         self.logger.info("%s speech pending", self._log_prefix)
 
@@ -337,6 +356,7 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
     def _upload_and_play(self, frames: list[np.ndarray], generation: int) -> None:
         upload_id: str | None = None
         try:
+            upload_started_at = time.monotonic()
             if generation != self._generation:
                 return
             if not frames:
@@ -402,9 +422,21 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
             self._next_play_monotonic = play_until_monotonic
             speaking_until_estimate = time.time() + duration + self._safety_delay
             self._estimated_end_time = max(self._estimated_end_time, speaking_until_estimate)
+            pending_to_play = (
+                time.monotonic() - self._pending_started_at
+                if self._pending_started_at
+                else 0.0
+            )
             self.logger.info(
-                "%s uploaded %d bytes (%.1fs audio), playing upload_id=%s, speaking_until=%.3f",
-                self._log_prefix, len(wav_bytes), duration, upload_id, speaking_until_estimate,
+                "%s uploaded %d bytes (%.1fs audio), playing upload_id=%s, speaking_until=%.3f upload_elapsed=%.2fs pending_to_play=%.2fs chunks=%d",
+                self._log_prefix,
+                len(wav_bytes),
+                duration,
+                upload_id,
+                speaking_until_estimate,
+                time.monotonic() - upload_started_at,
+                pending_to_play,
+                total_chunks,
             )
             mark_speaking_for(duration + self._safety_delay)
 
