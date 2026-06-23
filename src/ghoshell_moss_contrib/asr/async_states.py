@@ -83,6 +83,8 @@ def _normalize_local_asr_text(text: str) -> str:
     }
     for source, target in replacements.items():
         normalized = normalized.replace(source, target)
+    for mark in ("，", ",", "。", "！", "!", "？", "?", "；", ";", "：", ":"):
+        normalized = normalized.replace(mark, "")
     return normalized.replace(" ", "")
 
 

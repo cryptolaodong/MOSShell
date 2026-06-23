@@ -40,10 +40,13 @@ def test_safe_local_fallback_rejects_likely_fragments() -> None:
     assert not _is_safe_local_fallback_text("小明好")
     assert not _is_safe_local_fallback_text("小白米酒")
     assert not _is_safe_local_fallback_text("要重視在外面")
+    assert not _is_safe_local_fallback_text("小白米")
+    assert not _is_safe_local_fallback_text("找一号")
+    assert not _is_safe_local_fallback_text("我")
 
 
 def test_rescue_prompt_only_allows_wake_like_fragments() -> None:
     for text in ("小白癢", "小一號", "小孩好", "叫白魚好", "小白吧"):
         assert _looks_like_rescuable_short_wake_fragment(_normalize_local_asr_text(text))
-    for text in ("就好", "小鈴好", "小明好", "小白米酒"):
+    for text in ("就好", "小鈴好", "小明好", "小白米酒", "小白米", "找一号", "我"):
         assert not _looks_like_rescuable_short_wake_fragment(_normalize_local_asr_text(text))
