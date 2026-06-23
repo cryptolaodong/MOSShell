@@ -1,6 +1,7 @@
 from ghoshell_moss_contrib.asr.async_states import (
     _canonicalize_safe_local_fallback_text,
     _is_safe_local_fallback_text,
+    _looks_like_rescuable_wake_second_pass,
     _looks_like_rescuable_short_wake_fragment,
     _normalize_local_asr_text,
 )
@@ -50,3 +51,10 @@ def test_rescue_prompt_only_allows_wake_like_fragments() -> None:
         assert _looks_like_rescuable_short_wake_fragment(_normalize_local_asr_text(text))
     for text in ("就好", "小鈴好", "小明好", "小白米酒", "小白米", "找一号", "我"):
         assert not _looks_like_rescuable_short_wake_fragment(_normalize_local_asr_text(text))
+
+
+def test_rescue_model_only_runs_on_short_wake_like_fragments() -> None:
+    for text in ("小丸你好", "小玩意好", "想办你好", "叫白你好"):
+        assert _looks_like_rescuable_wake_second_pass(_normalize_local_asr_text(text))
+    for text in ("我", "請問一下", "小明好", "小白米酒", "背景声音测试"):
+        assert not _looks_like_rescuable_wake_second_pass(_normalize_local_asr_text(text))

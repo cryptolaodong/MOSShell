@@ -130,6 +130,16 @@ def _looks_like_rescuable_short_wake_fragment(normalized: str) -> bool:
     return any(token in normalized for token in ("你", "好", "号", "痒", "吧"))
 
 
+def _looks_like_rescuable_wake_second_pass(normalized: str) -> bool:
+    if not 2 <= len(normalized) <= 8:
+        return False
+    if any(blocked in normalized for blocked in ("酒", "明", "铃", "鈴")):
+        return False
+    if not normalized.startswith(("小", "想", "叫", "老")):
+        return False
+    return any(token in normalized for token in ("你好", "好", "号", "號"))
+
+
 def _canonicalize_safe_local_fallback_text(text: str) -> str:
     cleaned = _clean_local_asr_text(text)
     normalized = _normalize_local_asr_text(cleaned)
@@ -738,6 +748,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._local_fallback_cache_dir = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_CACHE_DIR", "").strip()
         self._local_fallback_initial_prompt = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_INITIAL_PROMPT", "").strip()
         self._local_fallback_rescue_prompt = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_RESCUE_PROMPT", "").strip()
+        self._local_fallback_rescue_model = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_RESCUE_MODEL", "").strip()
         self._local_fallback_min_rms = _float_env("MOSS_ASR_LOCAL_FALLBACK_MIN_RMS", 900.0)
         self._local_fallback_min_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS", 0.8)
         self._local_fallback_quiet_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS", 0.45)
@@ -746,6 +757,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._local_fallback_max_audio_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_MAX_AUDIO_SECONDS", 6.0)
         self._local_fallback_pad_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_PAD_SECONDS", 0.15)
         self._local_fallback_drop_unsafe = _bool_env("MOSS_ASR_LOCAL_FALLBACK_DROP_UNSAFE", False)
+        self._save_safe_local_fallback_audio = _bool_env("MOSS_ASR_SAVE_SAFE_LOCAL_FALLBACK_AUDIO", False)
         self._batch_started_at = 0.0
         self._committed_at = 0.0
 
@@ -1000,6 +1012,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 local_fallback_trigger_max=self._local_fallback_trigger_max_seconds,
                 local_fallback_drop_unsafe=self._local_fallback_drop_unsafe,
                 local_fallback_rescue=bool(self._local_fallback_rescue_prompt),
+                local_fallback_rescue_model=self._local_fallback_rescue_model,
             )
 
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
@@ -1668,6 +1681,68 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         text_len=len(rescue_text),
                         text_preview=rescue_text[:40],
                     )
+        if (
+            text
+            and self._local_fallback_rescue_model
+            and self._local_fallback_rescue_model != self._local_fallback_model
+            and not _is_safe_local_fallback_text(text)
+            and _looks_like_rescuable_wake_second_pass(_normalize_local_asr_text(text))
+        ):
+            rescue_model_started = time.time()
+            _latency_log(
+                "asr_local_fallback_rescue_model_start",
+                reason=reason,
+                model=self._local_fallback_rescue_model,
+                text_len=len(text),
+                text_preview=text[:40],
+            )
+            try:
+                rescue_model_text = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _local_whisper_transcribe,
+                        flat,
+                        sample_rate=sample_rate,
+                        model_name=self._local_fallback_rescue_model,
+                        cache_dir=self._local_fallback_cache_dir,
+                        site_packages=self._local_fallback_site_packages,
+                        initial_prompt=self._local_fallback_rescue_prompt,
+                    ),
+                    timeout=max(0.1, self._local_fallback_timeout_seconds),
+                )
+            except Exception as e:
+                _latency_log(
+                    "asr_local_fallback_rescue_model_error",
+                    reason=reason,
+                    model=self._local_fallback_rescue_model,
+                    elapsed=round(time.time() - rescue_model_started, 3),
+                    error=str(e)[:200],
+                )
+            else:
+                _latency_log(
+                    "asr_local_fallback_rescue_model_done",
+                    reason=reason,
+                    model=self._local_fallback_rescue_model,
+                    elapsed=round(time.time() - rescue_model_started, 3),
+                    text_len=len(rescue_model_text),
+                    text_preview=rescue_model_text[:40],
+                )
+                if rescue_model_text and _is_safe_local_fallback_text(rescue_model_text):
+                    text = _canonicalize_safe_local_fallback_text(rescue_model_text)
+                    _latency_log(
+                        "asr_local_fallback_rescue_model_accept",
+                        reason=reason,
+                        model=self._local_fallback_rescue_model,
+                        text_len=len(text),
+                        text_preview=text[:40],
+                    )
+                else:
+                    _latency_log(
+                        "asr_local_fallback_rescue_model_reject",
+                        reason=reason,
+                        model=self._local_fallback_rescue_model,
+                        text_len=len(rescue_model_text),
+                        text_preview=rescue_model_text[:40],
+                    )
         if text and not _is_safe_local_fallback_text(text):
             _latency_log(
                 "asr_local_fallback_reject",
@@ -1713,6 +1788,31 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             commit_reason=reason,
             audio_max_rms=round(max_rms, 1),
         )
+        if self._save_safe_local_fallback_audio and self._current_batch is not None:
+            try:
+                audio = await self._current_batch.get_buffer()
+            except Exception as e:
+                _latency_log("asr_local_fallback_safe_audio_save_error", reason=reason, error=str(e)[:160])
+            else:
+                if audio is not None and len(audio) > 0:
+                    save_rec = Recognition(
+                        batch_id=self._batch_id,
+                        text=text,
+                        seq=self._seq + 1,
+                        sentence=True,
+                        is_last=True,
+                        created=now,
+                        commit_reason="local_fallback_safe_text",
+                        audio_max_rms=round(max_rms, 1),
+                    )
+                    _latency_log(
+                        "asr_local_fallback_safe_audio_save_requested",
+                        reason=reason,
+                        samples=int(len(audio)),
+                        text_len=len(text),
+                        max_rms=round(max_rms, 1),
+                    )
+                    await self._callback.save_batch(save_rec, audio)
         await self.on_recognition(rec)
 
     async def _retry_empty_audio(self, audio: np.ndarray, *, max_rms: float) -> str:

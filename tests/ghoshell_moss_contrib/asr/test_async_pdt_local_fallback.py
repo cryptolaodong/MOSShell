@@ -131,3 +131,109 @@ async def test_energy_vad_defers_empty_commit_for_local_fallback(monkeypatch) ->
     assert fallback_calls
     assert callback.recognitions[-1].text == "小白你好"
     assert callback.recognitions[-1].commit_reason == "local_whisper_quiet"
+    assert callback.saved_batches == []
+
+
+@pytest.mark.asyncio
+async def test_safe_local_fallback_audio_save_is_opt_in(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_SAVE_SAFE_LOCAL_FALLBACK_AUDIO", "1")
+
+    callback = _Callback()
+    batch = _Batch()
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=callback,
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(_Clock()),
+    )
+    state._current_batch = batch
+    state._batch_id = "batch-1"
+    state._seq = 41
+    batch.buffered.append(np.full(1600, 2000, dtype=np.int16))
+
+    await state._finish_with_local_fallback(
+        "小白你好",
+        reason="local_whisper_quiet",
+        max_rms=2000,
+        last_loud_age=0.3,
+    )
+
+    assert callback.recognitions[-1].text == "小白你好"
+    assert len(callback.saved_batches) == 1
+    rec, audio = callback.saved_batches[0]
+    assert rec.text == "小白你好"
+    assert rec.commit_reason == "local_fallback_safe_text"
+    assert len(audio) == 1600
+
+
+@pytest.mark.asyncio
+async def test_rescue_model_accepts_safe_second_pass(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_RESCUE_MODEL", "base")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_CACHE_DIR", "")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_SITE_PACKAGES", "")
+
+    calls = []
+
+    def transcribe(audio, *, sample_rate, model_name, cache_dir, site_packages, initial_prompt):
+        calls.append(model_name)
+        return "小丸你好" if model_name == "tiny" else "小白你好"
+
+    monkeypatch.setattr(async_states, "_local_whisper_transcribe", transcribe)
+
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=_Callback(),
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(_Clock()),
+    )
+    batch = _Batch()
+    batch.buffered.append(np.full(1600, 2000, dtype=np.int16))
+    state._current_batch = batch
+
+    text = await state._try_local_fallback(
+        reason="local_whisper_quiet",
+        max_rms=2000,
+        last_loud_age=0.3,
+    )
+
+    assert text == "小白你好"
+    assert calls == ["tiny", "base"]
+
+
+@pytest.mark.asyncio
+async def test_rescue_model_rejects_unsafe_second_pass(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_RESCUE_MODEL", "base")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_CACHE_DIR", "")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_SITE_PACKAGES", "")
+
+    calls = []
+
+    def transcribe(audio, *, sample_rate, model_name, cache_dir, site_packages, initial_prompt):
+        calls.append(model_name)
+        return "小丸你好" if model_name == "tiny" else "小完一号"
+
+    monkeypatch.setattr(async_states, "_local_whisper_transcribe", transcribe)
+
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=_Callback(),
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(_Clock()),
+    )
+    batch = _Batch()
+    batch.buffered.append(np.full(1600, 2000, dtype=np.int16))
+    state._current_batch = batch
+
+    text = await state._try_local_fallback(
+        reason="local_whisper_quiet",
+        max_rms=2000,
+        last_loud_age=0.3,
+    )
+
+    assert text == ""
+    assert calls == ["tiny", "base"]
