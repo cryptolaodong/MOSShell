@@ -325,3 +325,23 @@ class TestAdapter:
             "我能听你说话、回答问题，并同步表情和头部动作。"
         )
         assert _simple_fast_reply_for_text("你能做什么，详细展开讲讲") is None
+
+    def test_brief_voice_request_routes_to_brief_llm(self):
+        from ._runtime import _brief_voice_request_kind
+
+        assert _brief_voice_request_kind("小白你觉得北京这个城市怎么样请用一句话回答") == "brief_llm"
+        assert _brief_voice_request_kind("小白请简短回答你喜欢什么颜色") == "brief_llm"
+
+    def test_brief_voice_request_keeps_body_actions_on_full_llm(self):
+        from ._runtime import _brief_voice_request_kind
+
+        assert _brief_voice_request_kind("小白动动脑袋并用一句话回答") is None
+        assert _brief_voice_request_kind("小白点头说收到") is None
+
+    def test_simple_fast_reply_for_brief_opinion(self):
+        from ._runtime import _simple_fast_reply_with_kind
+
+        kind, reply = _simple_fast_reply_with_kind("小白你觉得北京这个城市怎么样请用一句话回答")
+
+        assert kind == "brief_opinion"
+        assert reply == "我觉得北京这个城市很有生命力，快节奏里也有自己的温度。"

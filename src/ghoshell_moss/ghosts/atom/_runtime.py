@@ -55,6 +55,62 @@ _FAST_CAPABILITY_PATTERNS = (
     "有什么功能",
 )
 _FAST_CAPABILITY_DETAIL_WORDS = ("详细", "展开", "具体", "列表", "所有")
+_FAST_OPINION_PATTERNS = ("怎么样", "如何", "好不好")
+_FAST_BRIEF_PATTERNS = (
+    "一句话",
+    "一两句",
+    "简短",
+    "简单回答",
+    "简单说",
+    "短一点",
+    "四个字",
+    "几个字",
+    "不要超过",
+    "不超过",
+    "20字",
+    "二十字",
+    "十个字",
+)
+_FAST_BRIEF_ACTION_WORDS = (
+    "做动作",
+    "动作",
+    "动动",
+    "点头",
+    "摇头",
+    "抬头",
+    "低头",
+    "转头",
+    "扭头",
+    "看左",
+    "看右",
+    "表情",
+    "天线",
+    "跳舞",
+    "dance",
+    "headmove",
+    "emotion",
+)
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
 def _request_text(parts) -> str:
@@ -91,12 +147,62 @@ def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
                 "我能听你说话、回答问题，并同步表情和头部动作。",
             ),
         )
+    opinion_reply = _simple_opinion_reply_for_text(text)
+    if opinion_reply:
+        return "brief_opinion", opinion_reply
     return None, None
 
 
 def _simple_fast_reply_for_text(text: str) -> str | None:
     _, reply = _simple_fast_reply_with_kind(text)
     return reply
+
+
+def _simple_opinion_reply_for_text(text: str) -> str | None:
+    normalized = _FAST_GREETING_STRIP_RE.sub("", text).lower()
+    if not normalized:
+        return None
+    if any(word in normalized for word in _FAST_BRIEF_ACTION_WORDS):
+        return None
+    if not any(pattern in normalized for pattern in _FAST_BRIEF_PATTERNS):
+        return None
+    if "你觉得" not in normalized or not any(pattern in normalized for pattern in _FAST_OPINION_PATTERNS):
+        return None
+
+    topic = normalized
+    if topic.startswith("小白"):
+        topic = topic[2:]
+    topic = topic.split("你觉得", 1)[-1]
+    for marker in _FAST_OPINION_PATTERNS:
+        if marker in topic:
+            topic = topic.split(marker, 1)[0]
+            break
+    topic = re.sub(r"(请)?用?(一两句|一句话|简短|简单回答|简单说).*", "", topic)
+    topic = topic.strip()
+    if not topic or len(topic) > 24:
+        return None
+    template = os.environ.get(
+        "MOSS_FAST_OPINION_TEMPLATE",
+        "我觉得{topic}很有生命力，快节奏里也有自己的温度。",
+    )
+    try:
+        return template.format(topic=topic)
+    except Exception:
+        return f"我觉得{topic}很有生命力，快节奏里也有自己的温度。"
+
+
+def _brief_voice_request_kind(text: str) -> str | None:
+    normalized = _FAST_GREETING_STRIP_RE.sub("", text).lower()
+    if not normalized:
+        return None
+    max_chars = _int_env("MOSS_FAST_BRIEF_MAX_CHARS", 90)
+    if len(normalized) > max_chars:
+        return None
+    if any(word in normalized for word in _FAST_BRIEF_ACTION_WORDS):
+        return None
+    if any(pattern in normalized for pattern in _FAST_BRIEF_PATTERNS):
+        return "brief_llm"
+    return None
 
 
 class Atom(Ghost):
@@ -266,6 +372,37 @@ class Atom(Ghost):
                 )
                 return
 
+            brief_kind = _brief_voice_request_kind(request_text)
+            if brief_kind and _bool_env("MOSS_FAST_BRIEF_LLM_ENABLED", False):
+                yielded_fast_brief = False
+                try:
+                    async for text in self._stream_fast_brief_reply(
+                        request_text=request_text,
+                        started_at=started_at,
+                        prompt_chars=prompt_chars,
+                    ):
+                        yielded_fast_brief = True
+                        yield text
+                    if yielded_fast_brief:
+                        return
+                    self._logger.warning(
+                        "[ReachyLatency] llm_fast_brief_empty elapsed=%.2fs fallback=full_llm",
+                        time.monotonic() - started_at,
+                    )
+                except Exception as e:
+                    if yielded_fast_brief:
+                        self._logger.warning(
+                            "[ReachyLatency] llm_fast_brief_failed_after_tokens elapsed=%.2fs error=%s",
+                            time.monotonic() - started_at,
+                            str(e)[:160],
+                        )
+                        return
+                    self._logger.warning(
+                        "[ReachyLatency] llm_fast_brief_failed elapsed=%.2fs fallback=full_llm error=%s",
+                        time.monotonic() - started_at,
+                        str(e)[:160],
+                    )
+
         self._logger.info(
             "[ReachyLatency] llm_request_start history_turns=%d prompt_chars=%d",
             len(history),
@@ -360,6 +497,85 @@ class Atom(Ghost):
                 self.save_model_request(moment, stream.response)
 
     # ── 生命周期 ──────────────────────────────────
+
+    async def _stream_fast_brief_reply(
+        self,
+        *,
+        request_text: str,
+        started_at: float,
+        prompt_chars: int,
+    ) -> AsyncIterator[str]:
+        api_key = os.environ.get("DEEPSEEK_API_KEY")
+        if not api_key:
+            raise RuntimeError("DEEPSEEK_API_KEY is not set")
+
+        import httpx
+        from openai import AsyncOpenAI
+
+        model_name = os.environ.get(
+            "MOSS_FAST_BRIEF_MODEL",
+            os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
+        )
+        base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
+        timeout = _float_env("MOSS_FAST_BRIEF_TIMEOUT_SECONDS", 3.5)
+        max_tokens = _int_env("MOSS_FAST_BRIEF_MAX_TOKENS", 90)
+        temperature = _float_env("MOSS_FAST_BRIEF_TEMPERATURE", 0.35)
+        system_prompt = os.environ.get(
+            "MOSS_FAST_BRIEF_SYSTEM_PROMPT",
+            "你是 Reachy Mini 机器人小白。用中文自然口语回答，最多一句话。"
+            "不要使用动作标签，不要复述用户问题，不要自问自答。",
+        )
+
+        self._logger.warning(
+            "[ReachyLatency] llm_fast_path kind=brief_llm text_len=%d prompt_chars=%d fast_prompt_chars=%d",
+            len(request_text),
+            prompt_chars,
+            len(system_prompt),
+        )
+        first_token_seen = False
+        total_chars = 0
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(
+                timeout,
+                connect=max(0.3, min(1.2, timeout)),
+            )
+        ) as http_client:
+            client = AsyncOpenAI(
+                base_url=base_url,
+                api_key=api_key,
+                http_client=http_client,
+                timeout=timeout,
+                max_retries=_int_env("MOSS_FAST_BRIEF_MAX_RETRIES", 0),
+            )
+            stream = await client.chat.completions.create(
+                model=model_name,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": request_text},
+                ],
+                max_tokens=max_tokens,
+                temperature=temperature,
+                stream=True,
+            )
+            async for chunk in stream:
+                if not chunk.choices:
+                    continue
+                text = chunk.choices[0].delta.content or ""
+                if not text:
+                    continue
+                total_chars += len(text)
+                if not first_token_seen:
+                    first_token_seen = True
+                    self._logger.info(
+                        "[ReachyLatency] llm_first_token elapsed=%.2fs route=brief_llm",
+                        time.monotonic() - started_at,
+                    )
+                yield text
+        self._logger.warning(
+            "[ReachyLatency] llm_fast_brief_done elapsed=%.2fs chars=%d",
+            time.monotonic() - started_at,
+            total_chars,
+        )
 
     async def __aenter__(self) -> Self:
         return self

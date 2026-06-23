@@ -616,7 +616,15 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 0.35)
         self._empty_final_wait_seconds = _float_env("MOSS_ASR_EMPTY_FINAL_WAIT_SECONDS", 0.35)
         self._server_vad_ms = _int_env("MOSS_ASR_SERVER_VAD_MS", 900)
-        self._stable_text_min_quiet_seconds = _float_env("MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS", 0.65)
+        self._stable_text_min_quiet_seconds = _float_env("MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS", 0.45)
+        self._stable_punct_min_quiet_seconds = _float_env(
+            "MOSS_ASR_STABLE_PUNCT_MIN_QUIET_SECONDS",
+            min(self._stable_text_min_quiet_seconds, 0.25),
+        )
+        self._stable_short_min_quiet_seconds = _float_env(
+            "MOSS_ASR_STABLE_SHORT_MIN_QUIET_SECONDS",
+            min(self._stable_text_min_quiet_seconds, 0.35),
+        )
         self._prespeech_batch_max_seconds = _float_env("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", 3.0)
         self._speech_no_text_max_seconds = _float_env("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", 5.5)
         self._speech_no_text_min_quiet_seconds = _float_env("MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS", 0.65)
@@ -638,7 +646,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._local_fallback_min_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS", 0.8)
         self._local_fallback_quiet_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS", 0.45)
         self._local_fallback_timeout_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_TIMEOUT_SECONDS", 2.0)
-        self._local_fallback_trigger_max_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS", 3.8)
+        self._local_fallback_trigger_max_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS", 2.0)
         self._local_fallback_max_audio_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_MAX_AUDIO_SECONDS", 6.0)
         self._local_fallback_pad_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_PAD_SECONDS", 0.15)
         self._batch_started_at = 0.0
@@ -809,7 +817,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 "[ReachyLatency] asr_tuning energy_hold=%s speech_rms=%s silence_rms=%s "
                 "short_stable=%.2fs long_stable=%.2fs "
                 "short_max=%d punct=%.2fs empty=%.2fs audio_idle=%.2fs final_wait=%.2fs "
-                "empty_final_wait=%.2fs server_vad=%dms stable_quiet=%.2fs prespeech_max=%.2fs "
+                "empty_final_wait=%.2fs server_vad=%dms stable_quiet=%.2fs "
+                "punct_quiet=%.2fs short_quiet=%.2fs prespeech_max=%.2fs "
                 "speech_no_text_max=%.2fs speech_no_text_quiet=%.2fs "
                 "speech_no_text_action=%s hard=%.2fx empty_retry=%s retry_min_rms=%.1f "
                 "input_gate=%s gate_rms=%.1f gate_pre=%.2fs gate_tail=%.2fs "
@@ -827,6 +836,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._empty_final_wait_seconds,
                 self._server_vad_ms,
                 self._stable_text_min_quiet_seconds,
+                self._stable_punct_min_quiet_seconds,
+                self._stable_short_min_quiet_seconds,
                 self._prespeech_batch_max_seconds,
                 self._speech_no_text_max_seconds,
                 self._speech_no_text_min_quiet_seconds,
@@ -858,6 +869,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 empty_final_wait=self._empty_final_wait_seconds,
                 server_vad_ms=self._server_vad_ms,
                 stable_quiet=self._stable_text_min_quiet_seconds,
+                stable_punct_quiet=self._stable_punct_min_quiet_seconds,
+                stable_short_quiet=self._stable_short_min_quiet_seconds,
                 prespeech_max=self._prespeech_batch_max_seconds,
                 speech_no_text_max=self._speech_no_text_max_seconds,
                 speech_no_text_quiet=self._speech_no_text_min_quiet_seconds,
@@ -1092,6 +1105,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                             last_loud_age=last_loud_age,
                         )
                         break
+                    # Local fallback may block for hundreds of ms. Do not let that
+                    # pause look like input silence while captured audio is queued.
+                    last_audio_time = time.time()
+                    if audio_queue:
+                        continue
 
             # 如果本地 VAD 明确听到过声音，但云端 ASR 长时间没有任何文字，
             # 这通常是被背景噪声或批次边界卡住的坏流。尽快旋转，避免短唤醒词被旧流吞掉。
@@ -1149,7 +1167,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
 
             # 音频队列空闲检测：如果检测到过语音活动，且音频队列持续为空超过配置时间，自动提交
             # 这个检测不依赖 ASR 返回空文本，直接基于音频输入
-            if not self._committed and has_speech:
+            if not self._committed and has_speech and not audio_queue:
                 audio_idle = time.time() - last_audio_time
                 if audio_idle >= self._audio_idle_commit_seconds:
                     self._logger.info(
@@ -1171,30 +1189,40 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 if _ends_terminal_punctuation(text):
                     threshold = self._stable_punct_commit_seconds
                     threshold_kind = "punct"
+                    min_quiet_seconds = self._stable_punct_min_quiet_seconds
                 elif len(text.strip()) <= self._short_text_max_chars:
                     threshold = self._stable_text_commit_seconds
                     threshold_kind = "short"
+                    min_quiet_seconds = self._stable_short_min_quiet_seconds
                 else:
                     threshold = self._long_stable_text_commit_seconds
                     threshold_kind = "long"
+                    min_quiet_seconds = self._stable_text_min_quiet_seconds
                 if stable_elapsed >= threshold:
                     quiet_elapsed = (
                         time.time() - last_loud_audio_time
                         if last_loud_audio_time > 0
                         else float("inf")
                     )
-                    if quiet_elapsed < self._stable_text_min_quiet_seconds:
+                    if quiet_elapsed < min_quiet_seconds:
                         await asyncio.sleep(0.01)
                         continue
                     self._logger.info(
-                        "ASR stable text timeout (%.1fs, threshold=%.1fs kind=%s, quiet=%.1fs, text=%r), auto-committing",
+                        "ASR stable text timeout (%.1fs, threshold=%.1fs kind=%s, quiet=%.1fs min_quiet=%.1fs, text=%r), auto-committing",
                         stable_elapsed,
                         threshold,
                         threshold_kind,
                         quiet_elapsed,
+                        min_quiet_seconds,
                         text[:80],
                     )
-                    await self._do_auto_commit(f"stable_text_{threshold_kind}")
+                    await self._do_auto_commit(
+                        f"stable_text_{threshold_kind}",
+                        quiet=round(quiet_elapsed, 3)
+                        if quiet_elapsed != float("inf")
+                        else None,
+                        min_quiet=round(min_quiet_seconds, 3),
+                    )
 
             # ASR 空文本超时检测：如果已经识别到过文字，且超过配置时间没有新的非空结果，自动提交
             if not self._committed and self._last_non_empty_recognition_time > 0:
