@@ -32,6 +32,13 @@ def _float_env(name: str, default: float) -> float:
         return default
 
 
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except Exception:
+        return default
+
+
 def _ends_terminal_punctuation(text: str) -> bool:
     return text.rstrip().endswith(("。", "？", "?", "！", "!", "；", ";", ".", "…"))
 
@@ -429,11 +436,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._last_non_empty_text: str = ""
         self._last_text_change_time: float = 0.0
         self._commit_reason: str = ""
-        self._stable_text_commit_seconds = _float_env("MOSS_ASR_STABLE_TEXT_COMMIT_SECONDS", 0.65)
-        self._stable_punct_commit_seconds = _float_env("MOSS_ASR_STABLE_PUNCT_COMMIT_SECONDS", 0.25)
-        self._empty_text_commit_seconds = _float_env("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", 0.65)
-        self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 0.55)
-        self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 0.55)
+        self._stable_text_commit_seconds = _float_env("MOSS_ASR_STABLE_TEXT_COMMIT_SECONDS", 0.45)
+        self._stable_punct_commit_seconds = _float_env("MOSS_ASR_STABLE_PUNCT_COMMIT_SECONDS", 0.18)
+        self._empty_text_commit_seconds = _float_env("MOSS_ASR_EMPTY_TEXT_COMMIT_SECONDS", 0.45)
+        self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 0.35)
+        self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 0.35)
+        self._server_vad_ms = _int_env("MOSS_ASR_SERVER_VAD_MS", 500)
         self._batch_started_at = 0.0
         self._committed_at = 0.0
 
@@ -597,13 +605,25 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 frame_duration=self._recognizer.frame_duration,
             )
 
+            self._logger.warning(
+                "[ReachyLatency] asr_tuning energy_hold=%s stable=%.2fs punct=%.2fs empty=%.2fs "
+                "audio_idle=%.2fs final_wait=%.2fs server_vad=%dms",
+                getattr(self._vad, "_silence_hold_time", None),
+                self._stable_text_commit_seconds,
+                self._stable_punct_commit_seconds,
+                self._empty_text_commit_seconds,
+                self._audio_idle_commit_seconds,
+                self._final_wait_seconds,
+                self._server_vad_ms,
+            )
+
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
             # stop_on_sentence=False：ASR 不会在句子边界自动结束，
-            # 由本地 VAD 检测静音后 commit，服务端 vad=2000 作为兜底
+            # 由本地 VAD 检测静音后 commit，服务端 VAD 作为兜底
             self._current_batch = await self._recognizer.new_batch(
                 callback=self,
                 batch_id=self._batch_id,
-                vad=2000,  # 服务端 VAD：2秒静音自动分句
+                vad=self._server_vad_ms,
                 stop_on_sentence=False,
             )
 

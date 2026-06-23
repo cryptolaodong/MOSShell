@@ -7,10 +7,18 @@
 只有在检测到语音之后的持续静音才会触发，避免纯静音录音被误提交。
 """
 
+import os
 import time
 from typing import Optional
 
 import numpy as np
+
+
+def _float_env(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, default))
+    except Exception:
+        return default
 
 
 class EnergyVAD:
@@ -25,7 +33,7 @@ class EnergyVAD:
         *,
         silence_threshold: float = 400.0,
         speech_threshold: float = 600.0,
-        silence_hold_time: float = 1.2,
+        silence_hold_time: Optional[float] = None,
     ):
         """
         Args:
@@ -35,7 +43,11 @@ class EnergyVAD:
         """
         self._silence_threshold = silence_threshold
         self._speech_threshold = speech_threshold
-        self._silence_hold_time = silence_hold_time
+        self._silence_hold_time = (
+            _float_env("MOSS_ASR_ENERGY_SILENCE_HOLD_SECONDS", 0.45)
+            if silence_hold_time is None
+            else silence_hold_time
+        )
 
         self._speech_detected = False
         self._silence_start: Optional[float] = None

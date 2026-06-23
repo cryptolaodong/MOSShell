@@ -299,21 +299,24 @@ async def main(matrix: Matrix) -> None:
     await threaded.set_state(AsyncListenerStateName.PDT_LISTENING.value)
 
     # 4. 持续循环：监听结束后自动重新开始监听
+    poll_interval = float(os.environ.get("MOSS_VOICE_LOOP_POLL_SECONDS", "0.15"))
+    restart_delay = float(os.environ.get("MOSS_VOICE_RESTART_DELAY_SECONDS", "0.08"))
+    speaking_tail = float(os.environ.get("MOSS_VOICE_ROBOT_SPEAKING_TAIL_SECONDS", "0.15"))
     try:
         while True:
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(poll_interval)
             try:
-                if robot_is_speaking(tail=0.2):
+                if robot_is_speaking(tail=speaking_tail):
                     await threaded.clear_buffer()
                     continue
                 current_state = await threaded.current_state()
                 state_name = current_state.name().value
                 # 如果不在监听状态，自动重新开始监听
                 if state_name != AsyncListenerStateName.PDT_LISTENING.value:
-                    await asyncio.sleep(0.3)  # 短暂间隔避免打断
+                    await asyncio.sleep(restart_delay)  # 短暂间隔避免打断
                     await threaded.set_state(AsyncListenerStateName.PDT_LISTENING.value)
             except Exception:
-                await asyncio.sleep(1)
+                await asyncio.sleep(0.3)
     except asyncio.CancelledError:
         pass
     finally:
