@@ -8,6 +8,8 @@ import asyncio
 import os
 import time
 from collections import deque
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, Union, Callable
 import numpy as np
 from ghoshell_common.contracts import LoggerItf
@@ -41,6 +43,17 @@ def _int_env(name: str, default: int) -> int:
 
 def _ends_terminal_punctuation(text: str) -> bool:
     return text.rstrip().endswith(("。", "？", "?", "！", "!", "；", ";", ".", "…"))
+
+
+def _latency_log(event: str, **fields) -> None:
+    path = Path(os.environ.get("MOSS_VOICE_LATENCY_LOG", ".moss_ws/runtime/logs/voice_latency.log"))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        values = " ".join(f"{key}={value!r}" for key, value in fields.items())
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat(timespec='milliseconds')} {event} {values}\n")
+    except Exception:
+        pass
 
 
 class AsyncAudioInputLoop:
@@ -620,6 +633,18 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._final_wait_seconds,
                 self._server_vad_ms,
             )
+            _latency_log(
+                "asr_tuning",
+                energy_hold=getattr(self._vad, "_silence_hold_time", None),
+                short_stable=self._stable_text_commit_seconds,
+                long_stable=self._long_stable_text_commit_seconds,
+                short_max=self._short_text_max_chars,
+                punct=self._stable_punct_commit_seconds,
+                empty=self._empty_text_commit_seconds,
+                audio_idle=self._audio_idle_commit_seconds,
+                final_wait=self._final_wait_seconds,
+                server_vad_ms=self._server_vad_ms,
+            )
 
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
             # stop_on_sentence=False：ASR 不会在句子边界自动结束，
@@ -675,6 +700,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             reason,
             self._committed_at - self._batch_started_at if self._batch_started_at else 0.0,
             self._last_non_empty_text[:80],
+        )
+        _latency_log(
+            "asr_auto_commit",
+            reason=reason,
+            elapsed=round(self._committed_at - self._batch_started_at, 3) if self._batch_started_at else 0.0,
+            text_len=len(self._last_non_empty_text.strip()),
         )
         if self._current_batch:
             await self._current_batch.commit()
@@ -780,6 +811,13 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     time.time() - wait_started,
                     time.time() - self._batch_started_at if self._batch_started_at else 0.0,
                     self._commit_reason or "manual",
+                )
+                _latency_log(
+                    "asr_final_wait",
+                    elapsed=round(time.time() - wait_started, 3),
+                    total=round(time.time() - self._batch_started_at, 3) if self._batch_started_at else 0.0,
+                    reason=self._commit_reason or "manual",
+                    text_len=len(self._last_non_empty_text.strip()),
                 )
                 break
 

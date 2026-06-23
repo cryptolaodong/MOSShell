@@ -281,7 +281,7 @@ class VolcengineTTSConf(BaseModel):
         description="火山的流式语音模型的地址",
     )
     connect_open_timeout: float = Field(
-        default_factory=lambda: _env_float("MOSS_TTS_CONNECT_OPEN_TIMEOUT", 2.5),
+        default_factory=lambda: _env_float("MOSS_TTS_CONNECT_OPEN_TIMEOUT", 0.8),
         description="WebSocket opening handshake timeout. Keep short for realtime voice.",
     )
     connect_attempts: int = Field(

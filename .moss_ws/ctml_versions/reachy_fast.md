@@ -21,7 +21,7 @@ Common examples:
 ```ctml
 <apps.bodies_reachymini:head_move yaw="10" duration="0.6"/>我往右看看。
 <apps.bodies_reachymini:head_move pitch="-8" duration="0.5"/>我点一下头。
-<apps.bodies_reachymini:emotion name="happy"/>嘿嘿。
+<apps.bodies_reachymini:emotion emoji="😊"/>嘿嘿。
 <apps.bodies_reachymini:dance name="simple_nod"/>好呀。
 <apps.bodies_reachymini:head_reset/>
 ```

@@ -297,3 +297,12 @@ class TestAdapter:
         request = moment_to_request(Moment())
         assert isinstance(request, ModelRequest)
         assert len(request.parts) == 0
+
+    def test_simple_fast_reply_for_greeting(self):
+        from ._runtime import _request_text, _simple_fast_reply_for_text
+        from pydantic_ai import TextContent
+
+        assert _simple_fast_reply_for_text("你好。") == "在呢。"
+        assert _simple_fast_reply_for_text("小白你好") == "在呢。"
+        assert _simple_fast_reply_for_text("你好，帮我看看延迟") is None
+        assert _request_text([TextContent(content="context"), TextContent(content="你好")]) == "你好"

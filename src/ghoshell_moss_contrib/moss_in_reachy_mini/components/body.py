@@ -103,6 +103,35 @@ EMOJI_MAP = {
 }
 
 
+EMOTION_NAME_ALIASES = {
+    "happy": "😊",
+    "smile": "😊",
+    "cheerful": "😊",
+    "laugh": "😆",
+    "laughing": "😆",
+    "sad": "😢",
+    "sleep": "😴",
+    "sleepy": "😴",
+    "thinking": "🤔",
+    "think": "🤔",
+    "curious": "👀",
+    "surprised": "😮",
+    "yes": "✅",
+    "no": "🙅",
+}
+EMOTION_MOVE_NAME_TO_EMOJI = {move_name: emoji for emoji, move_name in EMOJI_MAP.items()}
+
+
+def _normalize_emotion_emoji(value: str | None) -> str:
+    value = (value or "").strip()
+    if value in EMOJI_MAP:
+        return value
+    lowered = value.lower()
+    if lowered in EMOTION_NAME_ALIASES:
+        return EMOTION_NAME_ALIASES[lowered]
+    return EMOTION_MOVE_NAME_TO_EMOJI.get(value, "")
+
+
 def _load_emotions(ws: Workspace, logger: LoggerItf) -> dict:
     storage = ws.configs().sub_storage("reachy_mini_emotions")
     root = Path(storage.abspath())
@@ -166,16 +195,17 @@ class Body:
         )
         return f"{header}\n" + "\n".join(dance_docstrings)
 
-    async def emotion(self, emoji: str):
-        name = EMOJI_MAP.get(emoji, None)
-        if not name:
+    async def emotion(self, emoji: str = "", name: str = ""):
+        emoji = _normalize_emotion_emoji(emoji) or _normalize_emotion_emoji(name)
+        emotion_name = EMOJI_MAP.get(emoji, None)
+        if not emotion_name:
             return CommandTaskResult(
                 observe=False,
                 messages=[Message.new(name="__emotion__").with_content(
                     Text(text=f"本轮你生成的emoji={emoji}是错误的，下次记得使用列表里正确的emoji")
                 )]
             )
-        params = self._emotions.get(name)
+        params = self._emotions.get(emotion_name)
         if not params:
             return CommandTaskResult(
                 observe=False,
@@ -203,4 +233,3 @@ class Body:
             f"必须使用以下列表给定的emoji：{','.join(EMOJI_MAP.keys())}；万不可传非列表内的emoji。"
             f"如果emotion要和一句话同步，命令要放在那句话之前或句中，不要放在整句话之后。"
         )
-

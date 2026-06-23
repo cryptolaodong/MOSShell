@@ -1,4 +1,5 @@
 import os
+import re
 import time
 from typing import AsyncIterator, TYPE_CHECKING
 from typing_extensions import Self
@@ -14,6 +15,45 @@ if TYPE_CHECKING:
     from ._meta import AtomMeta
 
 __all__ = ["Atom"]
+
+
+_FAST_GREETING_WORDS = {
+    "hi",
+    "hello",
+    "hey",
+    "你好",
+    "你好啊",
+    "你好呀",
+    "您好",
+    "嗨",
+    "嗨喽",
+    "哈喽",
+    "哈罗",
+    "喂",
+    "在吗",
+    "你在吗",
+    "小白",
+    "小白你好",
+    "你好小白",
+}
+_FAST_GREETING_STRIP_RE = re.compile(r"[\s,，。！？!?；;：:\.、~～]+")
+
+
+def _request_text(parts) -> str:
+    """Extract text-only user content for local deterministic shortcuts."""
+    last_text = ""
+    for part in parts:
+        content = getattr(part, "content", None)
+        if isinstance(content, str) and content.strip():
+            last_text = content.strip()
+    return last_text
+
+
+def _simple_fast_reply_for_text(text: str) -> str | None:
+    normalized = _FAST_GREETING_STRIP_RE.sub("", text).lower()
+    if normalized in _FAST_GREETING_WORDS:
+        return os.environ.get("MOSS_FAST_GREETING_REPLY", "在呢。")
+    return None
 
 
 class Atom(Ghost):
@@ -155,6 +195,29 @@ class Atom(Ghost):
         started_at = time.monotonic()
         first_token_seen = False
         total_chars = 0
+
+        if os.environ.get("MOSS_FAST_GREETING_ENABLED", "1").lower() not in {
+            "0",
+            "false",
+            "no",
+            "off",
+        }:
+            request_text = _request_text(request.parts)
+            fast_reply = _simple_fast_reply_for_text(request_text)
+            if fast_reply:
+                self._logger.warning(
+                    "[ReachyLatency] llm_fast_path kind=greeting text_len=%d prompt_chars=%d",
+                    len(request_text),
+                    prompt_chars,
+                )
+                yield fast_reply
+                self._logger.warning(
+                    "[ReachyLatency] llm_fast_path_done elapsed=%.2fs chars=%d",
+                    time.monotonic() - started_at,
+                    len(fast_reply),
+                )
+                return
+
         self._logger.info(
             "[ReachyLatency] llm_request_start history_turns=%d prompt_chars=%d",
             len(history),

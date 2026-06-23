@@ -4,8 +4,11 @@ import os
 os.environ['GST_PLUGIN_PATH'] = ''
 os.environ['GST_PLUGIN_SYSTEM_PATH'] = ''
 
+import json
 import logging
 import threading
+from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -32,6 +35,17 @@ from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
 load_dotenv()
 
 # VAD auto-listen mode - no PTT key needed
+
+
+def _latency_log(event: str, **fields) -> None:
+    path = Path(os.environ.get("MOSS_VOICE_LATENCY_LOG", ".moss_ws/runtime/logs/voice_latency.log"))
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(fields, ensure_ascii=False, sort_keys=True)
+        with path.open("a", encoding="utf-8") as f:
+            f.write(f"{datetime.now().isoformat(timespec='milliseconds')} {event} {payload}\n")
+    except Exception:
+        pass
 
 # ── ThreadedListenerService (extracted from ConsolePTTChat) ──────────────
 
@@ -246,6 +260,12 @@ async def main(matrix: Matrix) -> None:
                         robot_speaking_remaining_seconds(),
                         result.text[:80],
                     )
+                    _latency_log(
+                        "voice_drop_robot_speaking",
+                        left_seconds=round(robot_speaking_remaining_seconds(), 3),
+                        text_len=len(result.text.strip()),
+                        reason=result.commit_reason or "",
+                    )
                     await threaded.clear_buffer()
                     display.show_state("idle")
                     return
@@ -255,6 +275,11 @@ async def main(matrix: Matrix) -> None:
                 now = _time.monotonic()
                 if not (result.text == _dedup["text"] and now - _dedup["ts"] < 1.5):
                     sent_started = _time.monotonic()
+                    _latency_log(
+                        "voice_final_before_send",
+                        text_len=len(result.text.strip()),
+                        reason=result.commit_reason or "",
+                    )
                     robot_mark_thinking()
                     matrix.session.add_input_signal(
                         result.text,
@@ -266,8 +291,21 @@ async def main(matrix: Matrix) -> None:
                         result.commit_reason or "",
                         _time.monotonic() - sent_started,
                     )
+                    _latency_log(
+                        "voice_final_sent",
+                        text_len=len(result.text.strip()),
+                        reason=result.commit_reason or "",
+                        submit_elapsed=round(_time.monotonic() - sent_started, 3),
+                    )
                     _dedup["text"] = result.text
                     _dedup["ts"] = now
+                else:
+                    _latency_log(
+                        "voice_duplicate_dropped",
+                        text_len=len(result.text.strip()),
+                        reason=result.commit_reason or "",
+                        since_last=round(now - _dedup["ts"], 3),
+                    )
                 display.show_sent()
                 display.show_state("idle")
                 display.show_footer()
@@ -280,6 +318,7 @@ async def main(matrix: Matrix) -> None:
             # 不处理 waiting → idle，让 on_recognition(is_last=True) 统一收尾
 
         async def on_error(self, error: str):
+            _latency_log("voice_error", error=str(error)[:200])
             display.console.print(f"  [red]❌ {error}[/red]")
 
         async def on_waken(self):
