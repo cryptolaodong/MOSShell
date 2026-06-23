@@ -1,10 +1,12 @@
 """音频输入实现 — ReachyMini WebRTC 麦克风 + SoundDevice 本地麦克风。"""
 import asyncio
+import json
 import logging
 import os
 import threading
 import time
 from typing import Optional
+from urllib import request
 
 import numpy as np
 
@@ -31,6 +33,13 @@ class ReachyMicAudioInput:
         self.dtype = dtype
         self._logger = logger or logging.getLogger("ReachyMicAudioInput")
         self._mini = None
+        self._media = None
+        self._MediaBackend = None
+        self._MediaManager = None
+        self._get_producer_list = None
+        self._daemon_url = ""
+        self._signalling_host = ""
+        self._camera_specs = None
         self._fallback = None
         self._closed = False
         self._started = False
@@ -38,25 +47,54 @@ class ReachyMicAudioInput:
         self._warned_unavailable_read = False
         self._read_count = 0
         self._warmup_reads = 20  # 前20次read返回静音，等WebRTC稳定
+        self._last_media_check = 0.0
+        self._media_check_interval = float(os.environ.get("MOSS_REACHY_MIC_MEDIA_CHECK_SECONDS", "2.0"))
+        self._last_nonzero_read = time.monotonic()
+        self._zero_read_count = 0
+        self._zero_reopen_reads = int(os.environ.get("MOSS_REACHY_MIC_ZERO_REOPEN_READS", "20"))
+        self._zero_reopen_seconds = float(os.environ.get("MOSS_REACHY_MIC_ZERO_REOPEN_SECONDS", "2.0"))
+        self._recovering_media = False
 
     async def start(self) -> None:
         if self._closed or self._started:
             return
         os.environ['GST_PLUGIN_PATH'] = ''
         os.environ['GST_PLUGIN_SYSTEM_PATH'] = ''
-        from reachy_mini import ReachyMini
+
+        from reachy_mini.media.camera_constants import get_camera_specs_by_name
+        from reachy_mini.media.media_manager import MediaBackend, MediaManager
+        from reachy_mini.media.webrtc_utils import get_producer_list
         robot_host = os.environ.get('REACHY_ROBOT_HOST', 'reachy-mini.local')
+        daemon_url = f"http://{robot_host}:8000"
+        self._MediaBackend = MediaBackend
+        self._MediaManager = MediaManager
+        self._get_producer_list = get_producer_list
+        self._daemon_url = daemon_url
         self._logger.warning("ReachyMicAudioInput: connecting to %s ...", robot_host)
         print(f"[ReachyMicAudioInput] connecting to {robot_host}...", flush=True)
         try:
-            _orig = ReachyMini.release_media
-            ReachyMini.release_media = lambda self: None
-            self._mini = ReachyMini(host=robot_host, connection_mode="network")
-            ReachyMini.release_media = _orig
+            status = {}
+            try:
+                status = self._fetch_daemon_status(timeout=3)
+                if status.get("media_released"):
+                    print("[ReachyMicAudioInput] acquiring daemon media before WebRTC...", flush=True)
+                    self._acquire_daemon_media(timeout=10)
+            except Exception as acquire_error:
+                print(f"[ReachyMicAudioInput] media acquire preflight failed: {acquire_error}", flush=True)
+                self._logger.warning("ReachyMicAudioInput: media acquire preflight failed: %s", acquire_error)
+
+            signalling_host = str(status.get("wlan_ip") or robot_host)
+            self._signalling_host = signalling_host
+            if not await self._wait_for_producer(signalling_host):
+                raise RuntimeError(f"Reachy WebRTC producer not ready at {signalling_host}:8443")
+
+            specs_name = str(status.get("camera_specs_name") or "")
+            self._camera_specs = get_camera_specs_by_name(specs_name) if specs_name else None
+            self._open_media(reason="startup", warmup_reads=self._warmup_reads)
             self._started = True
-            print(f"[ReachyMicAudioInput] SDK connected, waiting WebRTC...", flush=True)
-            await asyncio.sleep(5)
-            sr = self._mini.media.get_input_audio_samplerate()
+            print(f"[ReachyMicAudioInput] WebRTC media connected, warming up...", flush=True)
+            await asyncio.sleep(float(os.environ.get("MOSS_REACHY_MIC_WEBRTC_WARMUP_SECONDS", "1.5")))
+            sr = self._media.get_input_audio_samplerate()
             print(f"[ReachyMicAudioInput] ready! sr={sr}", flush=True)
             self._logger.warning("ReachyMicAudioInput: ready! sr=%s", sr)
         except Exception as e:
@@ -88,6 +126,82 @@ class ReachyMicAudioInput:
             )
             self._logger.warning("ReachyMicAudioInput: unavailable, returning silence")
 
+    def _fetch_daemon_status(self, *, timeout: float = 0.7) -> dict:
+        with request.urlopen(f"{self._daemon_url}/api/daemon/status", timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
+    def _acquire_daemon_media(self, *, timeout: float = 2.0) -> None:
+        req = request.Request(f"{self._daemon_url}/api/media/acquire", method="POST")
+        with request.urlopen(req, timeout=timeout):
+            pass
+
+    async def _wait_for_producer(self, signalling_host: str, *, timeout: Optional[float] = None) -> bool:
+        deadline = time.monotonic() + float(
+            timeout if timeout is not None else os.environ.get("MOSS_REACHY_MIC_WEBRTC_READY_TIMEOUT", "8")
+        )
+        while time.monotonic() < deadline:
+            try:
+                producers = self._get_producer_list(signalling_host, 8443)
+                if any(meta.get("name") == "reachymini" for meta in producers.values()):
+                    return True
+            except Exception:
+                pass
+            await asyncio.sleep(0.25)
+        return False
+
+    def _open_media(self, *, reason: str, warmup_reads: Optional[int] = None) -> None:
+        if self._media is not None:
+            try:
+                self._media.close()
+            except Exception:
+                pass
+        self._media = self._MediaManager(
+            backend=self._MediaBackend.WEBRTC,
+            log_level="WARNING",
+            signalling_host=self._signalling_host,
+            camera_specs=self._camera_specs,
+            daemon_url=self._daemon_url,
+        )
+        self._warmup_reads = int(warmup_reads if warmup_reads is not None else os.environ.get("MOSS_REACHY_MIC_REOPEN_WARMUP_READS", "5"))
+        self._last_nonzero_read = time.monotonic()
+        self._zero_read_count = 0
+        print(f"[ReachyMicAudioInput] media opened reason={reason}", flush=True)
+        self._logger.warning("ReachyMicAudioInput: media opened reason=%s", reason)
+
+    async def _recover_media_if_needed(self, *, force: bool = False, reason: str = "periodic") -> None:
+        if self._recovering_media or not self._daemon_url:
+            return
+        now = time.monotonic()
+        if not force and now - self._last_media_check < self._media_check_interval:
+            return
+        self._last_media_check = now
+        self._recovering_media = True
+        try:
+            try:
+                status = await asyncio.to_thread(self._fetch_daemon_status, timeout=0.7)
+            except Exception as status_error:
+                self._logger.debug("ReachyMicAudioInput media status check failed: %s", status_error)
+                return
+            if not status.get("media_released"):
+                return
+            self._logger.warning(
+                "ReachyMicAudioInput: daemon media was released; reacquiring reason=%s",
+                reason,
+            )
+            print(f"[ReachyMicAudioInput] daemon media released; reacquiring reason={reason}", flush=True)
+            await asyncio.to_thread(self._acquire_daemon_media, timeout=2.0)
+            signalling_host = str(status.get("wlan_ip") or self._signalling_host)
+            self._signalling_host = signalling_host
+            if not await self._wait_for_producer(signalling_host, timeout=4):
+                self._logger.warning(
+                    "ReachyMicAudioInput: WebRTC producer not ready after reacquire reason=%s",
+                    reason,
+                )
+                return
+            self._open_media(reason=f"recover:{reason}")
+        finally:
+            self._recovering_media = False
+
     async def read(self, *, rate: Optional[int] = None, duration: Optional[float] = None) -> np.ndarray:
         if self._fallback is not None:
             return await self._fallback.read(rate=rate, duration=duration)
@@ -96,23 +210,24 @@ class ReachyMicAudioInput:
                 print("[ReachyMicAudioInput] read silence: microphone source is unavailable", flush=True)
                 self._warned_unavailable_read = True
             return np.zeros(int(self.rate * (duration or 0.1)), dtype=self.dtype)
-        if not self._started or self._mini is None:
+        if not self._started or self._media is None:
             return np.zeros(int(self.rate * (duration or 0.1)), dtype=self.dtype)
         try:
             target_samples = int(self.rate * (duration or 0.1))
+            await self._recover_media_if_needed(reason="read")
             # 预热期：前N次读取返回静音，避免 WebRTC 初始噪声误触发 VAD
             if self._warmup_reads > 0:
                 self._warmup_reads -= 1
                 # 消费掉音频数据但不返回（让 WebRTC buffer 排空）
                 for _ in range(target_samples // 320 + 1):
-                    self._mini.media.get_audio_sample()
+                    self._media.get_audio_sample()
                     await asyncio.sleep(0.005)
                 return np.zeros(target_samples, dtype=self.dtype)
             chunks = []
             collected = 0
             max_attempts = target_samples // 160 + 10
             for _ in range(max_attempts):
-                sample = self._mini.media.get_audio_sample()
+                sample = self._media.get_audio_sample()
                 if sample is None:
                     await asyncio.sleep(0.01)
                     continue
@@ -121,7 +236,7 @@ class ReachyMicAudioInput:
                 else:
                     mono = sample
                 if mono.dtype == np.float32:
-                    mono = (mono * 32767).astype(np.int16)
+                    mono = (np.clip(mono, -1.0, 1.0) * 32767).astype(np.int16)
                 chunks.append(mono)
                 collected += len(mono)
                 if collected >= target_samples:
@@ -133,8 +248,18 @@ class ReachyMicAudioInput:
             if len(result) > target_samples:
                 result = result[:target_samples]
             self._read_count += 1
+            rms = float(np.sqrt(np.mean(result.astype(float) ** 2)))
+            if rms > 0.5:
+                self._last_nonzero_read = time.monotonic()
+                self._zero_read_count = 0
+            else:
+                self._zero_read_count += 1
+                if (
+                    self._zero_read_count >= self._zero_reopen_reads
+                    and time.monotonic() - self._last_nonzero_read >= self._zero_reopen_seconds
+                ):
+                    await self._recover_media_if_needed(force=True, reason="zero_audio")
             if self._read_count <= 3 or self._read_count % 100 == 0:
-                rms = float(np.sqrt(np.mean(result.astype(float) ** 2)))
                 print(f"[ReachyMicAudioInput] read #{self._read_count}: {len(result)} samples, rms={rms:.1f}", flush=True)
             return result
         except Exception as e:
@@ -153,6 +278,12 @@ class ReachyMicAudioInput:
         if self._fallback is not None:
             await self._fallback.close(error)
             self._fallback = None
+        if self._media:
+            try:
+                self._media.close()
+            except Exception:
+                pass
+            self._media = None
         if self._mini:
             try:
                 self._mini.__exit__(None, None, None)

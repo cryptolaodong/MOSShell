@@ -64,6 +64,12 @@ class VoiceTurnGate:
     def reset_idle_partial(self) -> None:
         self._idle_partial_first_ts = 0.0
 
+    def open_followup_window(self, now: float | None = None) -> None:
+        timestamp = self._clock() if now is None else now
+        if self.active_seconds > 0:
+            self._active_until = timestamp + self.active_seconds
+        self.reset_idle_partial()
+
     def is_addressed(self, text: str) -> bool:
         normalized = (text or "").strip().lower()
         if not normalized:

@@ -50,6 +50,19 @@ def test_followup_window_expires_back_to_quiet() -> None:
     assert decision.reason == "idle_not_addressed"
 
 
+def test_open_followup_window_allows_recovered_followup() -> None:
+    clock = Clock()
+    gate = VoiceTurnGate(active_seconds=3, clock=clock)
+
+    gate.open_followup_window()
+    clock.advance(1)
+    decision = gate.decide_final("现在能做什么")
+
+    assert decision.accept
+    assert decision.reason == "active_followup"
+    assert decision.active_before
+
+
 def test_default_idle_partial_does_not_commit_short_background_text() -> None:
     clock = Clock()
     gate = VoiceTurnGate(clock=clock)

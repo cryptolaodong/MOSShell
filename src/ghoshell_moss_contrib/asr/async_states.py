@@ -57,6 +57,8 @@ def _ends_terminal_punctuation(text: str) -> bool:
 _LOCAL_WHISPER_LOCK = threading.Lock()
 _LOCAL_WHISPER_MODEL = None
 _LOCAL_WHISPER_MODEL_KEY: tuple[str, str, str] | None = None
+_NO_TEXT_COOLDOWN_UNTIL = 0.0
+_NO_TEXT_FAILURE_COUNT = 0
 
 
 def _clean_local_asr_text(text: str) -> str:
@@ -73,6 +75,8 @@ def _normalize_local_asr_text(text: str) -> str:
         "會": "会",
         "臺": "台",
         "妳": "你",
+        "線": "线",
+        "夠": "够",
     }
     for source, target in replacements.items():
         normalized = normalized.replace(source, target)
@@ -82,12 +86,29 @@ def _normalize_local_asr_text(text: str) -> str:
 def _canonicalize_safe_local_fallback_text(text: str) -> str:
     cleaned = _clean_local_asr_text(text)
     normalized = _normalize_local_asr_text(cleaned)
-    wake_homophones = ("想掰", "小拜", "小摆", "小百")
+    exact_homophones = {
+        "小番茗好": "小白你好",
+    }
+    if normalized in exact_homophones:
+        return exact_homophones[normalized]
+    wake_homophones = ("想掰", "想把", "小拜", "小摆", "小百", "小班")
     for wake in wake_homophones:
-        if normalized.startswith(wake) and len(normalized) <= 8:
+        if normalized.startswith(wake) and len(normalized) <= 16:
             rest = normalized[len(wake):]
             if any(token in rest for token in ("你好", "在吗", "在不在", "哈喽", "hello")):
                 return f"小白{rest}"
+            if any(
+                token in rest
+                for token in ("能做", "会做", "做什么", "能够什么", "能干什么", "干什么")
+            ):
+                return "小白你现在能做什么"
+    if normalized.startswith("小白") and len(normalized) <= 16:
+        rest = normalized[2:]
+        if any(
+            token in rest
+            for token in ("能做", "会做", "做什么", "能够什么", "能干什么", "干什么")
+        ):
+            return "小白你现在能做什么"
     if normalized == "你现在能做什么":
         return "你现在能做什么"
     return cleaned
@@ -113,8 +134,22 @@ def _is_safe_local_fallback_text(text: str) -> bool:
     }
     if normalized in exact_phrases:
         return True
-    if normalized.startswith("小白") and len(normalized) <= 8:
-        return any(token in normalized for token in ("你好", "在吗", "在不在", "哈喽", "hello"))
+    if normalized.startswith("小白") and len(normalized) <= 16:
+        return any(
+            token in normalized
+            for token in (
+                "你好",
+                "在吗",
+                "在不在",
+                "哈喽",
+                "hello",
+                "能做什么",
+                "会做什么",
+                "能做",
+                "介绍一下",
+                "你是谁",
+            )
+        )
     if len(normalized) <= 12:
         return any(
             token in normalized
@@ -637,6 +672,13 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._input_gate_rms = _float_env("MOSS_ASR_INPUT_GATE_RMS", 450.0)
         self._input_gate_preroll_seconds = _float_env("MOSS_ASR_INPUT_GATE_PREROLL_SECONDS", 0.25)
         self._input_gate_tail_seconds = _float_env("MOSS_ASR_INPUT_GATE_TAIL_SECONDS", 0.55)
+        self._input_gate_open_frames = max(1, _int_env("MOSS_ASR_INPUT_GATE_OPEN_FRAMES", 1))
+        self._no_text_cooldown_seconds = _float_env("MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS", 0.0)
+        self._no_text_cooldown_factor = max(1.0, _float_env("MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR", 1.0))
+        self._no_text_cooldown_max_seconds = _float_env(
+            "MOSS_ASR_NO_TEXT_COOLDOWN_MAX_SECONDS",
+            self._no_text_cooldown_seconds,
+        )
         self._local_fallback_enabled = _bool_env("MOSS_ASR_LOCAL_FALLBACK_ENABLED", False)
         self._local_fallback_site_packages = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_SITE_PACKAGES", "").strip()
         self._local_fallback_model = os.environ.get("MOSS_ASR_LOCAL_FALLBACK_MODEL", "tiny").strip() or "tiny"
@@ -649,6 +691,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._local_fallback_trigger_max_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS", 2.0)
         self._local_fallback_max_audio_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_MAX_AUDIO_SECONDS", 6.0)
         self._local_fallback_pad_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_PAD_SECONDS", 0.15)
+        self._local_fallback_drop_unsafe = _bool_env("MOSS_ASR_LOCAL_FALLBACK_DROP_UNSAFE", False)
         self._batch_started_at = 0.0
         self._committed_at = 0.0
 
@@ -744,6 +787,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
 
     # AsyncRecognitionCallback 接口
     async def on_recognition(self, result: Recognition) -> None:
+        global _NO_TEXT_FAILURE_COUNT
         # 更新批次 ID 和序列号
         result.batch_id = self._batch_id
         self._seq += 1
@@ -752,6 +796,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._last_recognition = result
         # 跟踪最后一条非空识别结果
         if result.text and result.text.strip():
+            _NO_TEXT_FAILURE_COUNT = 0
             now = time.time()
             text = result.text.strip()
             self._last_non_empty_recognition_time = now
@@ -822,7 +867,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 "speech_no_text_max=%.2fs speech_no_text_quiet=%.2fs "
                 "speech_no_text_action=%s hard=%.2fx empty_retry=%s retry_min_rms=%.1f "
                 "input_gate=%s gate_rms=%.1f gate_pre=%.2fs gate_tail=%.2fs "
-                "local_fallback=%s local_model=%s local_min_rms=%.1f local_quiet=%.2fs",
+                "gate_open_frames=%d no_text_cooldown=%.2fs factor=%.2f max=%.2fs "
+                "local_fallback=%s local_model=%s local_min_rms=%.1f local_quiet=%.2fs drop_unsafe=%s",
                 getattr(self._vad, "_silence_hold_time", None),
                 getattr(self._vad, "_speech_threshold", None),
                 getattr(self._vad, "_silence_threshold", None),
@@ -849,10 +895,15 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._input_gate_rms,
                 self._input_gate_preroll_seconds,
                 self._input_gate_tail_seconds,
+                self._input_gate_open_frames,
+                self._no_text_cooldown_seconds,
+                self._no_text_cooldown_factor,
+                self._no_text_cooldown_max_seconds,
                 self._local_fallback_enabled,
                 self._local_fallback_model,
                 self._local_fallback_min_rms,
                 self._local_fallback_quiet_seconds,
+                self._local_fallback_drop_unsafe,
             )
             _latency_log(
                 "asr_tuning",
@@ -882,6 +933,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 input_gate_rms=self._input_gate_rms,
                 input_gate_preroll=self._input_gate_preroll_seconds,
                 input_gate_tail=self._input_gate_tail_seconds,
+                input_gate_open_frames=self._input_gate_open_frames,
+                no_text_cooldown=self._no_text_cooldown_seconds,
+                no_text_cooldown_factor=self._no_text_cooldown_factor,
+                no_text_cooldown_max=self._no_text_cooldown_max_seconds,
                 local_fallback=self._local_fallback_enabled,
                 local_fallback_model=self._local_fallback_model,
                 local_fallback_min_rms=self._local_fallback_min_rms,
@@ -889,6 +944,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 local_fallback_quiet=self._local_fallback_quiet_seconds,
                 local_fallback_timeout=self._local_fallback_timeout_seconds,
                 local_fallback_trigger_max=self._local_fallback_trigger_max_seconds,
+                local_fallback_drop_unsafe=self._local_fallback_drop_unsafe,
             )
 
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
@@ -958,10 +1014,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
 
     async def _process_audio_batch(self, audio_queue: deque[np.ndarray]) -> None:
         """处理 PTT 音频批次"""
+        global _NO_TEXT_COOLDOWN_UNTIL, _NO_TEXT_FAILURE_COUNT
         self._logger.info("PTT _process_audio_batch started")
         chunk_count = 0
         last_audio_time = time.time()  # 最后一次收到音频的时间
         last_loud_audio_time = 0.0
+        first_loud_audio_time = 0.0
         has_speech = False  # 是否检测到过真正超过阈值的语音活动
         max_rms = 0.0
         speech_threshold = float(getattr(self._vad, "_speech_threshold", 600.0) or 600.0)
@@ -972,6 +1030,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         preroll: deque[np.ndarray] = deque(maxlen=preroll_frames)
         input_gate_open = not self._input_noise_gate_enabled
         input_gate_last_loud_time = 0.0
+        input_gate_loud_frames = 0
+        cooldown_skip_logged = False
         local_fallback_attempted = False
         while not self._closed:
             # 检查批次是否完成
@@ -985,28 +1045,42 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 last_audio_time = time.time()
                 rms = float(np.sqrt(np.mean(audio_data.astype(float) ** 2)))
                 max_rms = max(max_rms, rms)
-                if rms >= activity_threshold:
-                    last_loud_audio_time = last_audio_time
-                    has_speech = True
+                if self._no_text_cooldown_seconds > 0:
+                    cooldown_remaining = _NO_TEXT_COOLDOWN_UNTIL - last_audio_time
+                    if cooldown_remaining > 0:
+                        if not cooldown_skip_logged:
+                            cooldown_skip_logged = True
+                            _latency_log(
+                                "asr_no_text_cooldown_skip",
+                                remaining=round(cooldown_remaining, 3),
+                                rms=round(rms, 1),
+                                max_rms=round(max_rms, 1),
+                            )
+                        continue
+                    cooldown_skip_logged = False
                 should_send_audio = True
                 if self._input_noise_gate_enabled:
                     should_send_audio = False
                     preroll.append(audio_data)
                     if rms >= gate_threshold:
                         input_gate_last_loud_time = last_audio_time
+                        input_gate_loud_frames += 1
                         if not input_gate_open:
-                            input_gate_open = True
-                            _latency_log(
-                                "asr_input_gate_open",
-                                rms=round(rms, 1),
-                                threshold=round(gate_threshold, 1),
-                                preroll_frames=len(preroll),
-                            )
-                            if self._current_batch:
-                                for frame in list(preroll)[:-1]:
-                                    await self._current_batch.buffer(frame)
-                        should_send_audio = True
+                            if input_gate_loud_frames >= self._input_gate_open_frames:
+                                input_gate_open = True
+                                _latency_log(
+                                    "asr_input_gate_open",
+                                    rms=round(rms, 1),
+                                    threshold=round(gate_threshold, 1),
+                                    preroll_frames=len(preroll),
+                                    confirmed_frames=input_gate_loud_frames,
+                                )
+                                if self._current_batch:
+                                    for frame in list(preroll)[:-1]:
+                                        await self._current_batch.buffer(frame)
+                        should_send_audio = input_gate_open
                     elif input_gate_open and input_gate_last_loud_time > 0:
+                        input_gate_loud_frames = 0
                         should_send_audio = (
                             last_audio_time - input_gate_last_loud_time
                             <= self._input_gate_tail_seconds
@@ -1019,12 +1093,18 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                             )
                             preroll.clear()
                     else:
+                        input_gate_loud_frames = 0
                         should_send_audio = False
+                if should_send_audio and rms >= activity_threshold:
+                    if not has_speech:
+                        first_loud_audio_time = last_audio_time
+                    last_loud_audio_time = last_audio_time
+                    has_speech = True
                 if should_send_audio and self._current_batch:
                     await self._current_batch.buffer(audio_data)
 
                 # 本地 VAD 静音检测
-                if self._vad is not None and not self._committed:
+                if self._vad is not None and not self._committed and should_send_audio:
                     chunk_count += 1
                     should_commit = self._vad(audio_data)
                     # 每50个chunk打印一次诊断信息（约2.5秒）
@@ -1081,7 +1161,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 and self._batch_started_at > 0
                 and last_loud_audio_time > 0
             ):
-                elapsed = time.time() - self._batch_started_at
+                speech_started_at = first_loud_audio_time or self._batch_started_at
+                elapsed = time.time() - speech_started_at
                 last_loud_age = time.time() - last_loud_audio_time
                 if (
                     elapsed >= self._local_fallback_min_seconds
@@ -1098,11 +1179,31 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         last_loud_age=last_loud_age,
                     )
                     if fallback_text:
+                        _NO_TEXT_FAILURE_COUNT = 0
                         await self._finish_with_local_fallback(
                             fallback_text,
                             reason="local_whisper_quiet",
                             max_rms=max_rms,
                             last_loud_age=last_loud_age,
+                        )
+                        break
+                    if self._local_fallback_drop_unsafe:
+                        self._start_no_text_cooldown(
+                            reason="local_fallback_no_safe_text",
+                            max_rms=max_rms,
+                        )
+                        _latency_log(
+                            "asr_local_fallback_noise_drop",
+                            max_rms=round(max_rms, 1),
+                            last_loud_age=round(last_loud_age, 3),
+                            speech_elapsed=round(elapsed, 3),
+                            elapsed=round(time.time() - self._batch_started_at, 3)
+                            if self._batch_started_at
+                            else 0.0,
+                        )
+                        await self._save_debug_batch(
+                            reason="local_fallback_no_safe_text",
+                            max_rms=max_rms,
                         )
                         break
                     # Local fallback may block for hundreds of ms. Do not let that
@@ -1120,7 +1221,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 and self._speech_no_text_max_seconds > 0
                 and self._batch_started_at > 0
             ):
-                elapsed = time.time() - self._batch_started_at
+                speech_started_at = first_loud_audio_time or self._batch_started_at
+                elapsed = time.time() - speech_started_at
                 if elapsed >= self._speech_no_text_max_seconds:
                     last_loud_age = (
                         time.time() - last_loud_audio_time
@@ -1142,11 +1244,18 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                             _latency_log(
                                 "asr_speech_no_text_rotate",
                                 elapsed=round(elapsed, 3),
+                                batch_elapsed=round(time.time() - self._batch_started_at, 3)
+                                if self._batch_started_at
+                                else 0.0,
                                 max_rms=round(max_rms, 1),
                                 last_loud_age=round(last_loud_age, 3)
                                 if last_loud_age != float("inf")
                                 else None,
                                 hard_elapsed=round(hard_elapsed, 3),
+                            )
+                            self._start_no_text_cooldown(
+                                reason=reason,
+                                max_rms=max_rms,
                             )
                             await self._save_debug_batch(reason=reason, max_rms=max_rms)
                             break
@@ -1275,10 +1384,36 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     reason=self._commit_reason or "manual",
                     text_len=len(self._last_non_empty_text.strip()),
                 )
+                if has_speech and not self._last_non_empty_text.strip() and max_rms > 0:
+                    await self._save_debug_batch(
+                        reason=self._commit_reason or "empty_speech_commit",
+                        max_rms=max_rms,
+                    )
                 break
 
             # 短暂休眠以避免忙等待
             await asyncio.sleep(0.01)
+
+    def _start_no_text_cooldown(self, *, reason: str, max_rms: float) -> None:
+        global _NO_TEXT_COOLDOWN_UNTIL, _NO_TEXT_FAILURE_COUNT
+        if self._no_text_cooldown_seconds <= 0:
+            return
+        _NO_TEXT_FAILURE_COUNT += 1
+        scaled = self._no_text_cooldown_seconds * (
+            self._no_text_cooldown_factor ** max(0, _NO_TEXT_FAILURE_COUNT - 1)
+        )
+        cap = self._no_text_cooldown_max_seconds
+        seconds = min(scaled, cap) if cap > 0 else scaled
+        _NO_TEXT_COOLDOWN_UNTIL = max(_NO_TEXT_COOLDOWN_UNTIL, time.time() + seconds)
+        _latency_log(
+            "asr_no_text_cooldown_start",
+            seconds=round(seconds, 3),
+            base_seconds=round(self._no_text_cooldown_seconds, 3),
+            failures=_NO_TEXT_FAILURE_COUNT,
+            reason=reason,
+            max_rms=round(max_rms, 1),
+            until=round(_NO_TEXT_COOLDOWN_UNTIL, 3),
+        )
 
     async def _save_debug_batch(self, *, reason: str, max_rms: float) -> None:
         if self._current_batch is None:

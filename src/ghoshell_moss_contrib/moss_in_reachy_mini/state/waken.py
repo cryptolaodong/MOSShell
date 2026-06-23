@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 
 from ghoshell_common.contracts import LoggerItf
@@ -75,7 +76,11 @@ class WakenState(BaseReachyState):
             await wait_for_speech_start("switch_state", self.logger)
         self._mini.enable_motors()
         self._mini.wake_up()
-        self._head.switch_idle_mode("breathing")
+        idle_head_mode = os.environ.get("REACHY_IDLE_HEAD_MODE", "hold").strip().lower()
+        if idle_head_mode not in {"hold", "breathing"}:
+            idle_head_mode = "hold"
+        self.logger.info("WakenState idle head mode: %s", idle_head_mode)
+        self._head.switch_idle_mode(idle_head_mode)
 
     async def on_close(self):
         pass

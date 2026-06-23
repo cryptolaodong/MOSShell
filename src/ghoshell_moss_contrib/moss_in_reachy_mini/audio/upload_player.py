@@ -48,6 +48,19 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
         return default
 
 
+def _connect_without_releasing_media(**kwargs) -> ReachyMini:
+    original_release_media = ReachyMini.release_media
+
+    def _noop_release_media(self) -> None:
+        self._media_released = True
+
+    ReachyMini.release_media = _noop_release_media
+    try:
+        return ReachyMini(**kwargs)
+    finally:
+        ReachyMini.release_media = original_release_media
+
+
 class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
     """Stream audio to Reachy Mini via WebSocket upload protocol.
 
@@ -378,45 +391,37 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                 self._play_done_event.set()
                 return
 
-            if generation != self._generation:
-                return
-            upload_id = str(uuid4())
-            self._current_upload_id = upload_id
-
-            # 1. Start upload
-            self._mini.client.send_command(UploadAudioStartCmd(
-                upload_id=upload_id,
-                total_chunks=total_chunks,
-                encoding="wav-base64",
-            ))
-
-            # 2. Send chunks
-            for i in range(total_chunks):
-                start = i * MAX_CHUNK_SIZE
-                end = start + MAX_CHUNK_SIZE
-                chunk_data = b64_data[start:end]
-                self._mini.client.send_command(UploadAudioChunkCmd(
-                    upload_id=upload_id,
-                    chunk_index=i,
-                    chunk=chunk_data,
-                ))
-
-            # 3. Finish upload
-            self._mini.client.send_command(UploadAudioFinishCmd(
-                upload_id=upload_id,
-            ))
-
-            # 4. Play
             duration = len(all_audio) / self.sample_rate
-            while time.monotonic() < self._next_play_monotonic:
-                if self._stop_event.is_set() or generation != self._generation:
+            for attempt in range(2):
+                if generation != self._generation:
                     return
-                time.sleep(min(0.05, self._next_play_monotonic - time.monotonic()))
-            if generation != self._generation:
-                return
-            self._mini.client.send_command(PlayUploadedAudioCmd(
-                upload_id=upload_id,
-            ))
+                upload_id = str(uuid4())
+                self._current_upload_id = upload_id
+                try:
+                    self._send_upload_commands(
+                        upload_id=upload_id,
+                        total_chunks=total_chunks,
+                        b64_data=b64_data,
+                        generation=generation,
+                    )
+                    while time.monotonic() < self._next_play_monotonic:
+                        if self._stop_event.is_set() or generation != self._generation:
+                            return
+                        time.sleep(min(0.05, self._next_play_monotonic - time.monotonic()))
+                    if generation != self._generation:
+                        return
+                    self._mini.client.send_command(PlayUploadedAudioCmd(
+                        upload_id=upload_id,
+                    ))
+                    break
+                except ConnectionError:
+                    if attempt >= 1:
+                        raise
+                    self.logger.warning(
+                        "%s upload/play connection lost; reconnecting and retrying once",
+                        self._log_prefix,
+                    )
+                    self._reconnect_robot_client()
             self._played_segment_count += 1
             play_until_monotonic = time.monotonic() + duration + self._safety_delay
             self._next_play_monotonic = play_until_monotonic
@@ -445,6 +450,51 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         finally:
             if generation == self._generation:
                 self._play_done_event.set()
+
+    def _send_upload_commands(
+        self,
+        *,
+        upload_id: str,
+        total_chunks: int,
+        b64_data: str,
+        generation: int,
+    ) -> None:
+        self._mini.client.send_command(UploadAudioStartCmd(
+            upload_id=upload_id,
+            total_chunks=total_chunks,
+            encoding="wav-base64",
+        ))
+        for i in range(total_chunks):
+            if self._stop_event.is_set() or generation != self._generation:
+                return
+            start = i * MAX_CHUNK_SIZE
+            end = start + MAX_CHUNK_SIZE
+            chunk_data = b64_data[start:end]
+            self._mini.client.send_command(UploadAudioChunkCmd(
+                upload_id=upload_id,
+                chunk_index=i,
+                chunk=chunk_data,
+            ))
+        self._mini.client.send_command(UploadAudioFinishCmd(
+            upload_id=upload_id,
+        ))
+
+    def _reconnect_robot_client(self) -> None:
+        try:
+            self._mini.client.disconnect()
+        except Exception:
+            pass
+        host = getattr(self._mini, "host", os.environ.get("REACHY_ROBOT_HOST", "reachy-mini.local"))
+        port = int(getattr(self._mini, "port", os.environ.get("REACHY_ROBOT_PORT", "8000")))
+        connection_mode = getattr(self._mini, "connection_mode", "network")
+        self._mini = _connect_without_releasing_media(
+            host=host,
+            port=port,
+            connection_mode=connection_mode,
+            media_backend="no_media",
+            log_level="WARNING",
+        )
+        self.logger.info("%s robot client reconnected", self._log_prefix)
 
     def _encode_wav(self, audio_data: np.ndarray) -> bytes:
         buf = io.BytesIO()

@@ -38,6 +38,22 @@ def _patched_discover(cls):
 Matrix.discover = _patched_discover
 
 
+def _patch_reachy_ws_liveness() -> None:
+    """Avoid false SDK disconnects when daemon heartbeat is sparse."""
+    try:
+        from reachy_mini.io.ws_client import WSClient
+    except Exception:
+        return
+    if getattr(WSClient, "_moss_liveness_patched", False):
+        return
+
+    def _is_connected(self) -> bool:
+        return getattr(self, "_ws", None) is not None and not getattr(self, "_stop_event").is_set()
+
+    WSClient.is_connected = _is_connected
+    WSClient._moss_liveness_patched = True
+
+
 async def _connect_robot(logger, robot_host: str, media_backend: str, max_attempts: int = 5) -> 'ReachyMini':
     """Connect to robot with retry logic. Returns ReachyMini instance or raises."""
     from reachy_mini import ReachyMini
@@ -97,7 +113,12 @@ async def _connection_watchdog(matrix: Matrix, mini, robot_host: str, media_back
             # Try to reconnect the client
             try:
                 from reachy_mini import ReachyMini
-                new_mini = ReachyMini(host=robot_host, media_backend=media_backend)
+                _orig_release = ReachyMini.release_media
+                ReachyMini.release_media = lambda self: None
+                try:
+                    new_mini = ReachyMini(host=robot_host, media_backend=media_backend)
+                finally:
+                    ReachyMini.release_media = _orig_release
                 # Swap the client reference so existing components use the new connection
                 mini.client = new_mini.client
                 mini.media_manager = new_mini.media_manager
@@ -125,6 +146,7 @@ async def provide_channel(matrix: Matrix) -> None:
     """
     logger = matrix.logger
     logger.info("[ReachyMini Body App] Matrix ready, building body channel...")
+    _patch_reachy_ws_liveness()
 
     from reachy_mini import ReachyMini
     robot_host = os.environ.get("REACHY_ROBOT_HOST", "reachy-mini.local")

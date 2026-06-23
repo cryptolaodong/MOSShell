@@ -10,6 +10,15 @@ from pydantic import Field
 __all__ = ["AudioPlayerProvider", "AudioPlayerConfig"]
 
 
+def _connect_reachy_without_releasing_media(ReachyMini, **kwargs):
+    original_release_media = ReachyMini.release_media
+    ReachyMini.release_media = lambda self: None
+    try:
+        return ReachyMini(**kwargs)
+    finally:
+        ReachyMini.release_media = original_release_media
+
+
 class AudioPlayerConfig(ConfigType):
     backend: Literal["miniaudio", "pyaudio", "reachy_mini"] = Field(
         default="miniaudio",
@@ -54,7 +63,11 @@ class AudioPlayerProvider(Provider[StreamAudioPlayer]):
             robot_host = os.environ.get("REACHY_ROBOT_HOST", "reachy-mini.local")
             # Step 1: connect without media to acquire it
             try:
-                tmp = ReachyMini(host=robot_host, media_backend="no_media")
+                tmp = _connect_reachy_without_releasing_media(
+                    ReachyMini,
+                    host=robot_host,
+                    media_backend="no_media",
+                )
                 if tmp.media_released:
                     tmp.acquire_media()
                     logger.info("[AudioPlayer] Media acquired, waiting for WebRTC...")

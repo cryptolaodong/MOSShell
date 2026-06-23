@@ -7,6 +7,16 @@ from ghoshell_moss.core.speech.base_player import BaseAudioStreamPlayer
 from reachy_mini import ReachyMini
 
 
+def _connect_without_releasing_media(**kwargs) -> ReachyMini:
+    """Create a no-media SDK client without releasing daemon-owned mic/camera."""
+    original_release_media = ReachyMini.release_media
+    ReachyMini.release_media = lambda self: None
+    try:
+        return ReachyMini(**kwargs)
+    finally:
+        ReachyMini.release_media = original_release_media
+
+
 class ReachyMiniStreamPlayer(BaseAudioStreamPlayer):
     def __init__(
         self,
@@ -102,7 +112,11 @@ class ReachyMiniStreamPlayerProvider(Provider[StreamAudioPlayer]):
 
         # Primary: upload-based player (WebSocket, no GStreamer needed, proven reliable)
         try:
-            mini = ReachyMini(host=robot_host, media_backend='no_media', connection_mode='network')
+            mini = _connect_without_releasing_media(
+                host=robot_host,
+                media_backend='no_media',
+                connection_mode='network',
+            )
             from ghoshell_moss_contrib.moss_in_reachy_mini.audio.upload_player import ReachyMiniUploadAudioPlayer
             logger.info('[ReachyMiniAudioPlayer] Using upload-based audio player (WebSocket)')
             return ReachyMiniUploadAudioPlayer(mini, sample_rate=24000, channels=1, logger=logger)
@@ -111,7 +125,7 @@ class ReachyMiniStreamPlayerProvider(Provider[StreamAudioPlayer]):
 
         # Fallback: try WebRTC streaming (requires functional GStreamer + WebRTC signaling)
         try:
-            tmp = ReachyMini(host=robot_host, media_backend='no_media')
+            tmp = _connect_without_releasing_media(host=robot_host, media_backend='no_media')
             if tmp.media_released:
                 tmp.acquire_media()
                 logger.info('[ReachyMiniAudioPlayer] Media acquired, waiting for WebRTC...')

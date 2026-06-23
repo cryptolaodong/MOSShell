@@ -12,6 +12,15 @@ def test_safe_local_fallback_accepts_short_entry_phrases() -> None:
 
 def test_safe_local_fallback_canonicalizes_wake_homophone() -> None:
     assert _canonicalize_safe_local_fallback_text("想掰你好") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("小班你好") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("小番茗好") == "小白你好"
+
+
+def test_safe_local_fallback_canonicalizes_noisy_ability_question() -> None:
+    assert _is_safe_local_fallback_text("小白底線才能做")
+    assert _canonicalize_safe_local_fallback_text("小白底線才能做") == "小白你现在能做什么"
+    assert _is_safe_local_fallback_text("想把你現在能夠什麼")
+    assert _canonicalize_safe_local_fallback_text("想把你現在能夠什麼") == "小白你现在能做什么"
 
 
 def test_safe_local_fallback_rejects_likely_fragments() -> None:

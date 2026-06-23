@@ -46,6 +46,50 @@ def _truthy_env(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
+    if mic_backend_selected not in {"reachy_robot", "auto_reachy_then_local"}:
+        return
+    force_defaults = _truthy_env("MOSS_REACHY_MIC_FORCE_ASR_DEFAULTS", True)
+    defaults = {
+        # The robot mic hears mechanical/environment bursts. Local tiny Whisper
+        # can hallucinate wake words on those bursts, and long empty cooldowns
+        # make real short turns feel like the robot ignored the user.
+        "MOSS_ASR_LOCAL_FALLBACK_ENABLED": "1",
+        "MOSS_ASR_LOCAL_FALLBACK_DROP_UNSAFE": "1",
+        "MOSS_ASR_LOCAL_FALLBACK_INITIAL_PROMPT": "",
+        "MOSS_ASR_LOCAL_FALLBACK_MIN_RMS": "1800",
+        "MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS": "0.9",
+        "MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS": "0.85",
+        "MOSS_ASR_LOCAL_FALLBACK_TIMEOUT_SECONDS": "3.0",
+        "MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS": "4.2",
+        "MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS": "0",
+        "MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR": "1.0",
+        "MOSS_ASR_NO_TEXT_COOLDOWN_MAX_SECONDS": "0",
+        "MOSS_ASR_ENERGY_SPEECH_RMS": "1800",
+        "MOSS_ASR_INPUT_GATE_RMS": "1800",
+        "MOSS_ASR_INPUT_GATE_OPEN_FRAMES": "1",
+        "MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS": "3.2",
+        "MOSS_ASR_SPEECH_NO_TEXT_HARD_MULTIPLIER": "1.6",
+        "MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS": "3.2",
+        "MOSS_ASR_INPUT_GATE_PREROLL_SECONDS": "2.0",
+        "MOSS_ASR_INPUT_GATE_TAIL_SECONDS": "1.2",
+        "MOSS_VOICE_SAVE_EMPTY_ASR_AUDIO": "0",
+        "MOSS_VOICE_SAVE_REJECTED_ASR_AUDIO": "1",
+        "MOSS_VOICE_REJECTED_ASR_AUDIO_MIN_RMS": "1800",
+    }
+    applied: dict[str, str] = {}
+    for name, value in defaults.items():
+        if force_defaults or name not in os.environ:
+            os.environ[name] = value
+            applied[name] = value
+    _latency_log(
+        "voice_reachy_mic_asr_defaults",
+        selected=mic_backend_selected,
+        forced=force_defaults,
+        applied=applied,
+    )
+
+
 def _workspace_root_for_logs() -> Path | None:
     workspace = os.environ.get("MOSS_WORKSPACE", "").strip()
     if workspace:
@@ -301,13 +345,23 @@ async def main(matrix: Matrix) -> None:
     if mic_backend in {"local", "sounddevice"}:
         console.print("[cyan]Voice mic backend: local sounddevice[/cyan]")
         sd_input = SoundDeviceAudioInput(rate=16000, channels=1)
+        mic_backend_selected = "local_sounddevice"
     elif mic_backend in {"reachy", "robot"}:
         console.print("[cyan]Voice mic backend: Reachy robot microphone[/cyan]")
         os.environ.setdefault("MOSS_REACHY_MIC_FALLBACK", "0")
         sd_input = ReachyMicAudioInput(rate=16000, channels=1)
+        mic_backend_selected = "reachy_robot"
     else:
         console.print("[cyan]Voice mic backend: auto (Reachy robot mic, then local fallback)[/cyan]")
         sd_input = ReachyMicAudioInput(rate=16000, channels=1)
+        mic_backend_selected = "auto_reachy_then_local"
+    _apply_reachy_mic_asr_defaults(mic_backend_selected)
+    _latency_log(
+        "voice_mic_backend_selected",
+        requested=mic_backend or "auto",
+        selected=mic_backend_selected,
+        input_id=getattr(sd_input, "input_id", ""),
+    )
 
     inner = AsyncListenerServiceImpl(
         config=config,
@@ -318,6 +372,11 @@ async def main(matrix: Matrix) -> None:
     main_loop = asyncio.get_running_loop()
     threaded = ThreadedListenerService(inner, main_loop, logger)
     await threaded.bootstrap()
+    _latency_log(
+        "voice_listener_bootstrap_done",
+        selected=mic_backend_selected,
+        input_id=getattr(sd_input, "input_id", ""),
+    )
 
     # 2. Callback: ASR text → session.add_input_signal()
     import time as _time
@@ -339,6 +398,16 @@ async def main(matrix: Matrix) -> None:
     local_fallback_followup_min_rms = float(
         os.environ.get("MOSS_VOICE_LOCAL_FALLBACK_FOLLOWUP_MIN_RMS", "900")
     )
+    wake_recovery_seconds = float(os.environ.get("MOSS_VOICE_WAKE_RECOVERY_SECONDS", "3.0"))
+    wake_recovery_min_rms = float(os.environ.get("MOSS_VOICE_WAKE_RECOVERY_MIN_RMS", "1800"))
+    wake_recovery_tokens = tuple(
+        token.strip()
+        for token in os.environ.get(
+            "MOSS_VOICE_WAKE_RECOVERY_TOKENS",
+            "你好,在吗,在不在,能做什么,会做什么,能做,做什么,动动,摇头,点头,转头,抬头,低头,跳舞,表情,介绍一下,你是谁",
+        ).split(",")
+        if token.strip()
+    )
     turn_gate = VoiceTurnGate(
         require_address_when_idle=require_address,
         address_words=address_words,
@@ -346,11 +415,14 @@ async def main(matrix: Matrix) -> None:
         idle_partial_chars=idle_partial_chars,
         idle_partial_seconds=idle_partial_seconds,
     )
+    _wake_recovery = {"until": 0.0, "reason": "", "rms": 0.0}
     control_file = Path(os.environ.get("MOSS_VOICE_CONTROL_FILE", "/private/tmp/moss_voice_control.json"))
     _control = {"mtime": 0.0}
     save_empty_audio = _truthy_env("MOSS_VOICE_SAVE_EMPTY_ASR_AUDIO", True)
     save_all_audio = _truthy_env("MOSS_VOICE_SAVE_ALL_ASR_AUDIO", False)
+    save_rejected_audio = _truthy_env("MOSS_VOICE_SAVE_REJECTED_ASR_AUDIO", False)
     debug_audio_min_rms = float(os.environ.get("MOSS_VOICE_DEBUG_AUDIO_MIN_RMS", "500"))
+    rejected_audio_min_rms = float(os.environ.get("MOSS_VOICE_REJECTED_ASR_AUDIO_MIN_RMS", "1800"))
     debug_audio_max_seconds = float(os.environ.get("MOSS_VOICE_DEBUG_AUDIO_MAX_SECONDS", "12"))
     debug_audio_dir = _voice_debug_audio_dir()
 
@@ -371,12 +443,21 @@ async def main(matrix: Matrix) -> None:
         action = str(payload.get("action") or "").strip().lower()
         if action == "clear":
             await threaded.clear_buffer()
+            _wake_recovery["until"] = 0.0
             display.show_state("idle")
             _latency_log(
                 "voice_control_clear",
                 nonce=str(payload.get("nonce") or "")[:80],
                 source=str(payload.get("source") or "")[:80],
             )
+
+    def _is_wake_recovery_followup_text(text: str) -> bool:
+        normalized = (text or "").strip().lower()
+        normalized = normalized.strip(" \t\r\n，,。！？!?；;：:")
+        normalized = normalized.replace(" ", "")
+        if not normalized or len(normalized) > 24:
+            return False
+        return any(token in normalized for token in wake_recovery_tokens)
 
     class VoiceCallback(AsyncListenerCallback):
         async def on_recognition(self, result: Recognition):
@@ -406,6 +487,15 @@ async def main(matrix: Matrix) -> None:
                 addressed_before = turn_gate.is_addressed(text)
                 active_left_before = turn_gate.active_left(now)
                 active_before = active_left_before > 0
+                recovery_left = max(0.0, float(_wake_recovery.get("until", 0.0)) - now)
+                recovery_allowed = (
+                    is_local_fallback
+                    and not addressed_before
+                    and not active_before
+                    and recovery_left > 0
+                    and audio_max_rms >= wake_recovery_min_rms
+                    and _is_wake_recovery_followup_text(text)
+                )
                 weak_local_fallback = False
                 if is_local_fallback and (addressed_before or active_before):
                     min_rms = (
@@ -423,6 +513,26 @@ async def main(matrix: Matrix) -> None:
                         active_before=active_before,
                         active_left_seconds=round(active_left_before, 3),
                         text_len=len(text),
+                    )
+                elif recovery_allowed:
+                    turn_gate.open_followup_window(now)
+                    _wake_recovery["until"] = 0.0
+                    gate_decision = VoiceTurnDecision(
+                        accept=True,
+                        reason="wake_recovery_followup",
+                        addressed=False,
+                        active_before=False,
+                        active_left_seconds=round(recovery_left, 3),
+                        text_len=len(text),
+                    )
+                    _latency_log(
+                        "voice_wake_recovery_accept",
+                        text_len=len(text),
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        recovery_left=round(recovery_left, 3),
+                        armed_reason=str(_wake_recovery.get("reason") or "")[:60],
+                        armed_rms=round(float(_wake_recovery.get("rms", 0.0) or 0.0), 1),
                     )
                 else:
                     gate_decision = turn_gate.decide_final(text, now)
@@ -551,7 +661,25 @@ async def main(matrix: Matrix) -> None:
             rms, peak = _audio_rms_peak(flat)
             text = (rec.text or "").strip()
             reason = rec.commit_reason or ""
-            should_save = save_all_audio or (save_empty_audio and not text and rms >= debug_audio_min_rms)
+            rejected_reason = reason in {
+                "local_fallback_no_safe_text",
+                "speech_no_text_timeout",
+            } or (not text and reason in {
+                "energy_vad",
+                "audio_idle",
+                "empty_text_timeout",
+                "empty_speech_commit",
+            })
+            try:
+                rec_max_rms = float(getattr(rec, "audio_max_rms", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                rec_max_rms = 0.0
+            diagnostic_rms = max(rms, rec_max_rms)
+            should_save = (
+                save_all_audio
+                or (save_empty_audio and not text and rms >= debug_audio_min_rms)
+                or (save_rejected_audio and rejected_reason and diagnostic_rms >= rejected_audio_min_rms)
+            )
             if not should_save:
                 return
             sample_rate = 16000
@@ -574,10 +702,12 @@ async def main(matrix: Matrix) -> None:
                     "text_len": len(text),
                     "is_last": rec.is_last,
                     "rms": round(rms, 2),
+                    "diagnostic_rms": round(diagnostic_rms, 2),
                     "peak": peak,
                     "sample_rate": sample_rate,
                     "samples": int(len(flat)),
                     "duration_seconds": round(len(flat) / sample_rate, 3),
+                    "save_rejected_audio": bool(save_rejected_audio and rejected_reason),
                     "created_at": time.time(),
                 }
                 meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -587,9 +717,25 @@ async def main(matrix: Matrix) -> None:
                     reason=reason,
                     text_len=len(text),
                     rms=round(rms, 2),
+                    diagnostic_rms=round(diagnostic_rms, 2),
                     peak=peak,
                     duration=round(len(flat) / sample_rate, 3),
                 )
+                if (
+                    wake_recovery_seconds > 0
+                    and not text
+                    and rejected_reason
+                    and diagnostic_rms >= wake_recovery_min_rms
+                ):
+                    _wake_recovery["until"] = _time.monotonic() + wake_recovery_seconds
+                    _wake_recovery["reason"] = reason
+                    _wake_recovery["rms"] = diagnostic_rms
+                    _latency_log(
+                        "voice_wake_recovery_armed",
+                        reason=reason,
+                        diagnostic_rms=round(diagnostic_rms, 1),
+                        seconds=round(wake_recovery_seconds, 3),
+                    )
             except Exception as e:
                 _latency_log("voice_debug_audio_save_error", error=str(e)[:200])
 
