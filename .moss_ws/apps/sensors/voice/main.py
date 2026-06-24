@@ -129,8 +129,10 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS": "0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR": "1.0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_MAX_SECONDS": "0",
-        "MOSS_ASR_ENERGY_SPEECH_RMS": "1100",
-        "MOSS_ASR_INPUT_GATE_RMS": "1100",
+        # The Reachy robot mic is quieter than the Mac loopback baseline. Keep
+        # semantic wake gating strict, but let short "小白你好" turns enter ASR.
+        "MOSS_ASR_ENERGY_SPEECH_RMS": "800",
+        "MOSS_ASR_INPUT_GATE_RMS": "800",
         "MOSS_ASR_INPUT_GATE_OPEN_FRAMES": "1",
         "MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS": "5.5",
         "MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS": "1.25",

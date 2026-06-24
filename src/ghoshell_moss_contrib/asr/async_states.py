@@ -290,6 +290,8 @@ def _canonicalize_safe_local_fallback_text(text: str) -> str:
         "来你好": "小白你好",
         "想玩你好": "小白你好",
         "做完你好": "小白你好",
+        "小白天啊": "小白你好",
+        "希望拜你好": "小白你好",
     }
     if normalized in exact_homophones:
         return exact_homophones[normalized]

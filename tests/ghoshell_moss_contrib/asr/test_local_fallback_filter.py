@@ -42,6 +42,8 @@ def test_safe_local_fallback_canonicalizes_wake_homophone() -> None:
     assert _canonicalize_safe_local_fallback_text("來你好") == "小白你好"
     assert _canonicalize_safe_local_fallback_text("想玩你好") == "小白你好"
     assert _canonicalize_safe_local_fallback_text("做完你好") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("小白天啊") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("希望拜你好") == "小白你好"
 
 
 def test_safe_local_fallback_canonicalizes_noisy_ability_question() -> None:
