@@ -358,6 +358,27 @@ class TestAdapter:
         assert clipped_mis_asr_kind == "latency_probe"
         assert clipped_mis_asr_reply == "我会等你说完，再简短回答。"
 
+    def test_simple_fast_reply_for_turn_ack(self):
+        from ._runtime import _simple_fast_reply_with_kind
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白我现在要说一个长句子来测试你会不会抢答，请等我把这句话全部说完以后再用一句话回答我听明白了。"
+        )
+        assert kind == "turn_ack"
+        assert reply == "我听明白了。"
+
+        clipped_kind, clipped_reply = _simple_fast_reply_with_kind(
+            "小白请不要在中间停顿的时。明白了。"
+        )
+        assert clipped_kind == "turn_ack"
+        assert clipped_reply == "我听明白了。"
+
+        clipped_answer_kind, clipped_answer_reply = _simple_fast_reply_with_kind(
+            "小白我现在要说一个长句子来测试你会吐。再用一句话回答我，听明白了。"
+        )
+        assert clipped_answer_kind == "turn_ack"
+        assert clipped_answer_reply == "我听明白了。"
+
     def test_brief_voice_request_routes_to_brief_llm(self):
         from ._runtime import _brief_voice_request_kind
 

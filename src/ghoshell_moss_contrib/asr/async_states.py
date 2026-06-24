@@ -103,6 +103,41 @@ def _looks_like_complete_addressed_text(body: str) -> bool:
     return any(body.endswith(suffix) for suffix in complete_suffixes)
 
 
+def _looks_like_wait_for_more_turn_fragment(body: str) -> bool:
+    if not body:
+        return False
+    tokens = (
+        "听我完整",
+        "完整说完",
+        "完整說完",
+        "说完",
+        "說完",
+        "等我",
+        "请等",
+        "請等",
+        "再回答",
+        "再回答我",
+        "以后再",
+        "以後再",
+        "之后再",
+        "之後再",
+        "不要插话",
+        "不要插話",
+        "不要在中间",
+        "不要在中間",
+        "中间停顿",
+        "中間停頓",
+        "长句子",
+        "長句子",
+        "抢答",
+        "強打",
+        "最后",
+        "最後",
+        "只需要",
+    )
+    return any(token in body for token in tokens)
+
+
 _LOCAL_WHISPER_LOCK = threading.Lock()
 _LOCAL_WHISPER_MODEL = None
 _LOCAL_WHISPER_MODEL_KEY: tuple[str, str, str] | None = None
@@ -140,6 +175,11 @@ def _normalize_local_asr_text(text: str) -> str:
         "機": "机",
         "臺": "台",
         "來": "来",
+        "間": "间",
+        "頓": "顿",
+        "滾": "滚",
+        "還": "还",
+        "強": "强",
         "妳": "你",
         "線": "线",
         "夠": "够",
@@ -182,6 +222,14 @@ def _looks_like_short_wake_greeting(normalized: str) -> bool:
     if "白" not in normalized or "好" not in normalized:
         return False
     return _edit_distance(normalized, "小白你好") <= 2
+
+
+def _looks_like_repeated_wake_hallucination(normalized: str) -> bool:
+    phrase = "小白你好"
+    if len(normalized) <= len(phrase) or phrase not in normalized:
+        return False
+    compact = normalized.replace(phrase, "")
+    return not compact
 
 
 def _looks_like_rescuable_short_wake_fragment(normalized: str) -> bool:
@@ -276,6 +324,8 @@ def _is_safe_local_fallback_text(text: str) -> bool:
     normalized = _normalize_local_asr_text(_canonicalize_safe_local_fallback_text(text))
     if len(normalized) <= 1:
         return False
+    if _looks_like_repeated_wake_hallucination(normalized):
+        return False
     exact_phrases = {
         "小白",
         "小白你好",
@@ -332,6 +382,15 @@ _OPEN_REQUEST_KEYWORDS = (
     "介绍",
     "等我",
     "说完",
+    "中间",
+    "最后",
+    "只需要",
+    "听明白",
+    "清明白",
+    "插话",
+    "叉划",
+    "参划",
+    "抢答",
 )
 _OPEN_REQUEST_SEMANTIC_KEYWORDS = (
     "为什么",
@@ -357,6 +416,7 @@ _OPEN_REQUEST_PREFIX_ONLY = (
 
 _OPEN_REQUEST_WAKE_PREFIXES = (
     "小白",
+    "小板",
     "想把",
     "想白",
     "想完",
@@ -366,6 +426,55 @@ _OPEN_REQUEST_WAKE_PREFIXES = (
     "小摆",
     "小掰",
 )
+
+
+def _looks_like_turn_completion_request_fragment(normalized: str) -> bool:
+    if not 8 <= len(normalized) <= 90:
+        return False
+    if not (
+        normalized.startswith(("小白", "我想", "我现在", "来测试", "请", "不要", "等我", "最后"))
+        or normalized.startswith(("要说", "要說"))
+        or "来测试" in normalized[:12]
+        or "回答我听明白" in normalized
+        or "回答我清明白" in normalized
+        or "回答我新明白" in normalized
+    ):
+        return False
+    wait_tokens = (
+        "等我",
+        "说完",
+        "收完",
+        "全部说完",
+        "全部收完",
+        "完整说完",
+        "不要在中间",
+        "不要中间",
+        "中间停",
+        "中间停止",
+        "停滚",
+        "插话",
+        "叉划",
+        "参划",
+        "差跨",
+        "抢答",
+        "强大",
+        "只需要",
+    )
+    answer_tokens = (
+        "回答",
+        "一句话",
+        "听明白",
+        "清明白",
+        "新明白",
+        "心你败",
+        "心你敗",
+        "听你来",
+        "听你了",
+        "听你来了",
+    )
+    return any(token in normalized for token in wait_tokens) and any(
+        token in normalized for token in answer_tokens
+    )
 
 
 def _canonicalize_open_local_fallback_text(text: str) -> str:
@@ -389,6 +498,10 @@ def _canonicalize_open_local_fallback_text(text: str) -> str:
         token in normalized for token in ("简短", "简单", "一句话", "回答")
     ):
         return f"请{normalized[1:]}"
+    if _looks_like_turn_completion_request_fragment(normalized):
+        if normalized.startswith("小白"):
+            return cleaned
+        return f"小白{normalized}"
     clipped_prefixes = (
         "请用",
         "请简单",
@@ -409,6 +522,8 @@ def _is_safe_open_local_fallback_text(text: str) -> bool:
     normalized = _normalize_local_asr_text(_canonicalize_open_local_fallback_text(text))
     if not 6 <= len(normalized) <= 90:
         return False
+    if _looks_like_turn_completion_request_fragment(normalized):
+        return normalized.startswith("小白")
     if not any(token in normalized for token in _OPEN_REQUEST_KEYWORDS):
         return False
     if not any(token in normalized for token in _OPEN_REQUEST_SEMANTIC_KEYWORDS):
@@ -427,6 +542,60 @@ def _is_safe_open_local_fallback_text(text: str) -> bool:
         "机器人为什么",
     )
     return normalized.startswith(clipped_prefixes)
+
+
+def _looks_like_open_local_fallback_prefix_fragment(text: str) -> bool:
+    normalized = _normalize_local_asr_text(_canonicalize_open_local_fallback_text(text))
+    if not 6 <= len(normalized) <= 90:
+        return False
+    if _is_safe_open_local_fallback_text(normalized):
+        return False
+    if not normalized.startswith(("小白", "请", "不要", "等我", "要说", "要說")):
+        return False
+    prefix_tokens = (
+        "不要在中间",
+        "不要中间",
+        "中间停",
+        "中间停止",
+        "停滚",
+        "等我",
+        "收完",
+        "全部收完",
+        "插话",
+        "叉划",
+        "参划",
+        "差跨",
+        "抢答",
+        "强大",
+        "最后",
+    )
+    answer_tokens = (
+        "回答",
+        "一句话",
+        "听明白",
+        "清明白",
+        "新明白",
+        "心你败",
+        "心你敗",
+        "听你来",
+        "听你了",
+        "听你来了",
+        "只需要",
+    )
+    return any(token in normalized for token in prefix_tokens) and not any(
+        token in normalized for token in answer_tokens
+    )
+
+
+def _combine_open_local_fallback_fragments(previous: str, current: str) -> str:
+    first = _canonicalize_open_local_fallback_text(previous)
+    second = _canonicalize_open_local_fallback_text(current)
+    if not first or not second:
+        return ""
+    combined = f"{first}{second}"
+    if _is_safe_open_local_fallback_text(combined):
+        return _canonicalize_open_local_fallback_text(combined)
+    return ""
 
 
 def _looks_like_open_request_fragment(text: str) -> bool:
@@ -925,6 +1094,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._committed = False
         self._seq = 0
         self._last_recognition: Optional[Recognition] = None
+        self._last_batch_error: str = ""
 
         self._next_state: Optional[tuple[str, Optional[np.ndarray]]] = None
         self._last_non_empty_recognition_time: float = 0.0
@@ -1033,6 +1203,68 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             1,
             _int_env("MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT_MAX_CHARS", 5),
         )
+        default_empty_wake_max_seconds = (
+            self._local_fallback_trigger_max_seconds
+            if self._local_fallback_trigger_max_seconds > 0
+            else 4.5
+        )
+        self._empty_wake_fallback_enabled = _bool_env("MOSS_ASR_EMPTY_WAKE_FALLBACK_ENABLED", False)
+        self._empty_wake_fallback_min_rms = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_MIN_RMS",
+            self._local_fallback_min_rms,
+        )
+        self._empty_wake_fallback_min_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_MIN_SECONDS",
+            self._local_fallback_min_seconds,
+        )
+        self._empty_wake_fallback_quiet_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_QUIET_SECONDS",
+            min(self._local_fallback_quiet_seconds, 0.65),
+        )
+        self._empty_wake_fallback_max_speech_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_MAX_SPEECH_SECONDS",
+            default_empty_wake_max_seconds,
+        )
+        self._empty_wake_fallback_extended_min_rms = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_EXTENDED_MIN_RMS",
+            0.0,
+        )
+        self._empty_wake_fallback_extended_max_speech_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_EXTENDED_MAX_SPEECH_SECONDS",
+            self._empty_wake_fallback_max_speech_seconds,
+        )
+        self._empty_wake_fallback_max_active_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_MAX_ACTIVE_SECONDS",
+            2.4,
+        )
+        self._empty_wake_fallback_extended_max_active_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_EXTENDED_MAX_ACTIVE_SECONDS",
+            self._empty_wake_fallback_max_active_seconds,
+        )
+        self._empty_wake_fallback_min_active_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_MIN_ACTIVE_SECONDS",
+            0.0,
+        )
+        self._empty_wake_fallback_model = (
+            os.environ.get("MOSS_ASR_EMPTY_WAKE_FALLBACK_MODEL", self._local_fallback_model).strip()
+            or self._local_fallback_model
+        )
+        self._empty_wake_fallback_prompt = os.environ.get(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_PROMPT",
+            self._local_fallback_rescue_prompt,
+        ).strip()
+        self._empty_wake_fallback_timeout_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_TIMEOUT_SECONDS",
+            self._local_fallback_timeout_seconds,
+        )
+        self._empty_wake_fallback_max_audio_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_MAX_AUDIO_SECONDS",
+            min(self._local_fallback_max_audio_seconds, 4.5),
+        )
+        self._empty_wake_fallback_extended_max_audio_seconds = _float_env(
+            "MOSS_ASR_EMPTY_WAKE_FALLBACK_EXTENDED_MAX_AUDIO_SECONDS",
+            self._empty_wake_fallback_max_audio_seconds,
+        )
         self._save_safe_local_fallback_audio = _bool_env("MOSS_ASR_SAVE_SAFE_LOCAL_FALLBACK_AUDIO", False)
         self._final_open_fallback_enabled = _bool_env("MOSS_ASR_FINAL_OPEN_FALLBACK_ENABLED", False)
         self._final_open_fallback_min_rms = _float_env("MOSS_ASR_FINAL_OPEN_FALLBACK_MIN_RMS", 2400.0)
@@ -1051,6 +1283,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             "MOSS_ASR_FINAL_OPEN_FALLBACK_MAX_AUDIO_SECONDS",
             max(self._local_fallback_max_audio_seconds, 8.0),
         )
+        self._open_fallback_fragment_ttl_seconds = _float_env(
+            "MOSS_ASR_OPEN_FALLBACK_FRAGMENT_TTL_SECONDS",
+            12.0,
+        )
+        self._pending_open_fallback_fragment = ""
+        self._pending_open_fallback_fragment_at = 0.0
         self._local_fallback_final_emitted = False
         self._batch_started_at = 0.0
         self._committed_at = 0.0
@@ -1072,6 +1310,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._commit_reason = ""
         self._commit_audio_max_rms = 0.0
         self._local_fallback_final_emitted = False
+        self._pending_open_fallback_fragment = ""
+        self._pending_open_fallback_fragment_at = 0.0
         self._batch_started_at = time.time()
         self._committed_at = 0.0
 
@@ -1207,6 +1447,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
     async def on_error(self, error: str) -> None:
         if self._closed:
             return
+        self._last_batch_error = error
         await self._callback.on_error(error)
 
     async def save_batch(self, rec: Recognition, audio: np.ndarray) -> None:
@@ -1243,6 +1484,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 "input_gate=%s gate_rms=%.1f gate_pre=%.2fs gate_tail=%.2fs "
                 "gate_open_frames=%d no_text_cooldown=%.2fs factor=%.2f max=%.2fs "
                 "local_fallback=%s local_model=%s local_min_rms=%.1f local_quiet=%.2fs drop_unsafe=%s "
+                "empty_wake=%s empty_wake_model=%s empty_wake_min_rms=%.1f "
+                "empty_wake_active=%.2fs..%.2fs "
                 "final_open=%s final_open_model=%s final_open_min_rms=%.1f",
                 getattr(self._vad, "_silence_hold_time", None),
                 getattr(self._vad, "_speech_threshold", None),
@@ -1281,6 +1524,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._local_fallback_min_rms,
                 self._local_fallback_quiet_seconds,
                 self._local_fallback_drop_unsafe,
+                self._empty_wake_fallback_enabled,
+                self._empty_wake_fallback_model,
+                self._empty_wake_fallback_min_rms,
+                self._empty_wake_fallback_min_active_seconds,
+                self._empty_wake_fallback_max_active_seconds,
                 self._final_open_fallback_enabled,
                 self._final_open_fallback_model,
                 self._final_open_fallback_min_rms,
@@ -1341,6 +1589,27 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 local_fallback_rescue_unsafe_short=self._local_fallback_rescue_unsafe_short,
                 local_fallback_rescue_unsafe_short_max_chars=(
                     self._local_fallback_rescue_unsafe_short_max_chars
+                ),
+                empty_wake_fallback=self._empty_wake_fallback_enabled,
+                empty_wake_fallback_min_rms=self._empty_wake_fallback_min_rms,
+                empty_wake_fallback_min_seconds=self._empty_wake_fallback_min_seconds,
+                empty_wake_fallback_quiet=self._empty_wake_fallback_quiet_seconds,
+                empty_wake_fallback_max_speech=self._empty_wake_fallback_max_speech_seconds,
+                empty_wake_fallback_extended_min_rms=self._empty_wake_fallback_extended_min_rms,
+                empty_wake_fallback_extended_max_speech=(
+                    self._empty_wake_fallback_extended_max_speech_seconds
+                ),
+                empty_wake_fallback_min_active=self._empty_wake_fallback_min_active_seconds,
+                empty_wake_fallback_max_active=self._empty_wake_fallback_max_active_seconds,
+                empty_wake_fallback_extended_max_active=(
+                    self._empty_wake_fallback_extended_max_active_seconds
+                ),
+                empty_wake_fallback_model=self._empty_wake_fallback_model,
+                empty_wake_fallback_prompt=bool(self._empty_wake_fallback_prompt),
+                empty_wake_fallback_timeout=self._empty_wake_fallback_timeout_seconds,
+                empty_wake_fallback_max_audio=self._empty_wake_fallback_max_audio_seconds,
+                empty_wake_fallback_extended_max_audio=(
+                    self._empty_wake_fallback_extended_max_audio_seconds
                 ),
                 final_open_fallback=self._final_open_fallback_enabled,
                 final_open_fallback_min_rms=self._final_open_fallback_min_rms,
@@ -1431,9 +1700,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         normalized = _normalize_local_asr_text(stripped)
         if normalized in self._incomplete_prefix_address_words:
             return max(0.0, self._incomplete_prefix_min_quiet_seconds - quiet_elapsed)
+        body = _addressed_text_body(normalized, self._incomplete_prefix_address_words)
+        if _looks_like_wait_for_more_turn_fragment(body):
+            return max(0.0, self._incomplete_open_prefix_min_quiet_seconds - quiet_elapsed)
         if _ends_terminal_punctuation(stripped):
             return 0.0
-        body = _addressed_text_body(normalized, self._incomplete_prefix_address_words)
         if body in ("请用", "用一句话", "请简单", "请简短", "简单回答", "简短回答"):
             return max(0.0, self._incomplete_open_prefix_min_quiet_seconds - quiet_elapsed)
         if len(normalized) < self._incomplete_prefix_min_chars:
@@ -1446,6 +1717,21 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         if not body or _looks_like_complete_addressed_text(body):
             return 0.0
         return max(0.0, self._incomplete_prefix_min_quiet_seconds - quiet_elapsed)
+
+    def _empty_long_turn_quiet_remaining(self, text: str, speech_elapsed: float, quiet_elapsed: float) -> float:
+        if (
+            (text or "").strip()
+            or quiet_elapsed == float("inf")
+            or self._long_empty_text_min_quiet_seconds <= 0
+        ):
+            return 0.0
+        long_turn_floor = max(
+            self._local_fallback_trigger_max_seconds,
+            self._long_empty_text_commit_seconds,
+        )
+        if long_turn_floor > 0 and speech_elapsed < long_turn_floor:
+            return 0.0
+        return max(0.0, self._long_empty_text_min_quiet_seconds - quiet_elapsed)
 
     def _log_incomplete_prefix_defer(
         self,
@@ -1547,6 +1833,81 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         )
         return True, ready, elapsed, last_loud_age
 
+    def _empty_wake_fallback_window(
+        self,
+        *,
+        has_speech: bool,
+        attempted: bool,
+        max_rms: float,
+        first_loud_audio_time: float,
+        last_loud_audio_time: float,
+    ) -> tuple[bool, bool, float, float, float]:
+        if (
+            not self._empty_wake_fallback_enabled
+            or not self._local_fallback_enabled
+            or attempted
+            or not has_speech
+            or self._last_non_empty_text.strip()
+            or max_rms < self._empty_wake_fallback_min_rms
+            or self._batch_started_at <= 0
+            or last_loud_audio_time <= 0
+        ):
+            return False, False, 0.0, 0.0, 0.0
+        now = time.time()
+        speech_started_at = first_loud_audio_time or self._batch_started_at
+        elapsed = now - speech_started_at
+        last_loud_age = now - last_loud_audio_time
+        active_span = (
+            max(0.0, last_loud_audio_time - first_loud_audio_time)
+            if first_loud_audio_time > 0
+            else 0.0
+        )
+        extended = self._empty_wake_fallback_is_extended(max_rms)
+        max_speech_seconds = (
+            self._empty_wake_fallback_extended_max_speech_seconds
+            if extended
+            else self._empty_wake_fallback_max_speech_seconds
+        )
+        max_active_seconds = (
+            self._empty_wake_fallback_extended_max_active_seconds
+            if extended
+            else self._empty_wake_fallback_max_active_seconds
+        )
+        if (
+            max_speech_seconds > 0
+            and elapsed > max_speech_seconds
+        ):
+            return False, False, elapsed, last_loud_age, active_span
+        if (
+            self._empty_wake_fallback_min_active_seconds > 0
+            and active_span < self._empty_wake_fallback_min_active_seconds
+        ):
+            return False, False, elapsed, last_loud_age, active_span
+        if (
+            max_active_seconds > 0
+            and active_span > max_active_seconds
+        ):
+            return False, False, elapsed, last_loud_age, active_span
+        ready = (
+            elapsed >= self._empty_wake_fallback_min_seconds
+            and last_loud_age >= self._empty_wake_fallback_quiet_seconds
+        )
+        return True, ready, elapsed, last_loud_age, active_span
+
+    def _empty_wake_fallback_is_extended(self, max_rms: float) -> bool:
+        return (
+            self._empty_wake_fallback_extended_min_rms > 0
+            and max_rms >= self._empty_wake_fallback_extended_min_rms
+        )
+
+    def _empty_wake_fallback_audio_seconds(self, max_rms: float) -> float:
+        if self._empty_wake_fallback_is_extended(max_rms):
+            return self._empty_wake_fallback_extended_max_audio_seconds
+        return self._empty_wake_fallback_max_audio_seconds
+
+    def _empty_wake_fallback_allows_batch_error(self, max_rms: float) -> bool:
+        return self._empty_wake_fallback_is_extended(max_rms)
+
     def _should_try_final_open_fallback(self, text: str, *, max_rms: float) -> bool:
         if (
             not self._final_open_fallback_enabled
@@ -1592,8 +1953,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         cooldown_skip_logged = False
         local_fallback_attempts = 0
         local_fallback_next_after = 0.0
+        empty_wake_fallback_attempted = False
         final_open_fallback_attempted = False
         incomplete_prefix_defer_last_log = 0.0
+        self._last_batch_error = ""
 
         async def try_unsafe_short_text_rescue(reason: str) -> bool:
             global _NO_TEXT_FAILURE_COUNT
@@ -1669,6 +2032,77 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 return True
             return False
 
+        async def try_empty_wake_text_rescue(reason: str) -> bool:
+            global _NO_TEXT_FAILURE_COUNT
+            nonlocal empty_wake_fallback_attempted
+            if (
+                reason == "asr_batch_error_no_text"
+                and not self._empty_wake_fallback_allows_batch_error(max_rms)
+            ):
+                _latency_log(
+                    "asr_empty_wake_fallback_skip",
+                    reason=reason,
+                    max_rms=round(max_rms, 1),
+                    extended_min_rms=round(self._empty_wake_fallback_extended_min_rms, 1),
+                )
+                return False
+            eligible, ready, elapsed, last_loud_age, active_span = self._empty_wake_fallback_window(
+                has_speech=has_speech,
+                attempted=empty_wake_fallback_attempted,
+                max_rms=max_rms,
+                first_loud_audio_time=first_loud_audio_time,
+                last_loud_audio_time=last_loud_audio_time,
+            )
+            if not eligible:
+                return False
+            _latency_log(
+                "asr_empty_wake_fallback_defer",
+                reason=reason,
+                ready=ready,
+                speech_elapsed=round(elapsed, 3),
+                last_loud_age=round(last_loud_age, 3),
+                active_span=round(active_span, 3),
+                max_rms=round(max_rms, 1),
+                model=self._empty_wake_fallback_model,
+                extended=self._empty_wake_fallback_is_extended(max_rms),
+            )
+            if not ready:
+                return True
+
+            empty_wake_fallback_attempted = True
+            max_audio_seconds = self._empty_wake_fallback_audio_seconds(max_rms)
+            fallback_text = await self._try_local_fallback(
+                reason="empty_wake_fallback",
+                max_rms=max_rms,
+                last_loud_age=last_loud_age,
+                model_name=self._empty_wake_fallback_model,
+                timeout_seconds=self._empty_wake_fallback_timeout_seconds,
+                max_audio_seconds=max_audio_seconds,
+                initial_prompt=self._empty_wake_fallback_prompt,
+            )
+            if fallback_text and _is_safe_local_fallback_text(fallback_text):
+                _NO_TEXT_FAILURE_COUNT = 0
+                await self._finish_with_local_fallback(
+                    _canonicalize_safe_local_fallback_text(fallback_text),
+                    reason="empty_wake_fallback",
+                    max_rms=max_rms,
+                    last_loud_age=last_loud_age,
+                )
+                return True
+            _latency_log(
+                "asr_empty_wake_fallback_miss",
+                reason=reason,
+                text_len=len(fallback_text or ""),
+                text_preview=(fallback_text or "")[:40],
+                speech_elapsed=round(elapsed, 3),
+                last_loud_age=round(last_loud_age, 3),
+                active_span=round(active_span, 3),
+                max_rms=round(max_rms, 1),
+                extended=self._empty_wake_fallback_is_extended(max_rms),
+                max_audio_seconds=round(max_audio_seconds, 3),
+            )
+            return False
+
         async def try_final_open_text_rescue(reason: str, *, last_loud_age: float) -> bool:
             global _NO_TEXT_FAILURE_COUNT
             nonlocal final_open_fallback_attempted
@@ -1702,8 +2136,46 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 timeout_seconds=self._final_open_fallback_timeout_seconds,
                 max_audio_seconds=self._final_open_fallback_max_audio_seconds,
             )
+            if (
+                self._pending_open_fallback_fragment
+                and self._open_fallback_fragment_ttl_seconds > 0
+                and time.time() - self._pending_open_fallback_fragment_at
+                > self._open_fallback_fragment_ttl_seconds
+            ):
+                _latency_log(
+                    "asr_open_fallback_fragment_expire",
+                    age=round(time.time() - self._pending_open_fallback_fragment_at, 3),
+                    ttl=round(self._open_fallback_fragment_ttl_seconds, 3),
+                    text_preview=self._pending_open_fallback_fragment[:40],
+                )
+                self._pending_open_fallback_fragment = ""
+                self._pending_open_fallback_fragment_at = 0.0
+            if fallback_text and self._pending_open_fallback_fragment:
+                combined_text = _combine_open_local_fallback_fragments(
+                    self._pending_open_fallback_fragment,
+                    fallback_text,
+                )
+                if combined_text:
+                    _NO_TEXT_FAILURE_COUNT = 0
+                    _latency_log(
+                        "asr_open_fallback_fragment_merge",
+                        previous_preview=self._pending_open_fallback_fragment[:40],
+                        current_preview=fallback_text[:40],
+                        text_preview=combined_text[:60],
+                    )
+                    self._pending_open_fallback_fragment = ""
+                    self._pending_open_fallback_fragment_at = 0.0
+                    await self._finish_with_local_fallback(
+                        combined_text,
+                        reason="final_open_fallback",
+                        max_rms=max_rms,
+                        last_loud_age=last_loud_age,
+                    )
+                    return True
             if fallback_text and _is_safe_open_local_fallback_text(fallback_text):
                 _NO_TEXT_FAILURE_COUNT = 0
+                self._pending_open_fallback_fragment = ""
+                self._pending_open_fallback_fragment_at = 0.0
                 await self._finish_with_local_fallback(
                     _canonicalize_open_local_fallback_text(fallback_text),
                     reason="final_open_fallback",
@@ -1713,6 +2185,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 return True
             if fallback_text and _is_safe_local_fallback_text(fallback_text):
                 _NO_TEXT_FAILURE_COUNT = 0
+                self._pending_open_fallback_fragment = ""
+                self._pending_open_fallback_fragment_at = 0.0
                 await self._finish_with_local_fallback(
                     _canonicalize_safe_local_fallback_text(fallback_text),
                     reason="final_open_fallback",
@@ -1720,6 +2194,18 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     last_loud_age=last_loud_age,
                 )
                 return True
+            if fallback_text and _looks_like_open_local_fallback_prefix_fragment(fallback_text):
+                self._pending_open_fallback_fragment = _canonicalize_open_local_fallback_text(fallback_text)
+                self._pending_open_fallback_fragment_at = time.time()
+                _latency_log(
+                    "asr_open_fallback_fragment_store",
+                    reason=reason,
+                    text_len=len(self._pending_open_fallback_fragment),
+                    text_preview=self._pending_open_fallback_fragment[:60],
+                    ttl=round(self._open_fallback_fragment_ttl_seconds, 3),
+                    max_rms=round(max_rms, 1),
+                )
+                return False
             _latency_log(
                 "asr_final_open_fallback_miss",
                 reason=reason,
@@ -1732,6 +2218,27 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         while not self._closed:
             # 检查批次是否完成
             if self._current_batch and await self._current_batch.is_done():
+                if has_speech and not self._committed and not self._last_non_empty_text.strip():
+                    last_loud_age = (
+                        time.time() - last_loud_audio_time
+                        if last_loud_audio_time > 0
+                        else float("inf")
+                    )
+                    reason = "asr_batch_error_no_text" if self._last_batch_error else "asr_batch_done_no_text"
+                    _latency_log(
+                        "asr_batch_done_no_text_rescue",
+                        reason=reason,
+                        error=(self._last_batch_error or "")[:160],
+                        max_rms=round(max_rms, 1),
+                        last_loud_age=round(last_loud_age, 3)
+                        if last_loud_age != float("inf")
+                        else None,
+                    )
+                    if await try_empty_wake_text_rescue(reason):
+                        break
+                    if await try_final_open_text_rescue(reason, last_loud_age=last_loud_age):
+                        break
+                    await self._save_debug_batch(reason=reason, max_rms=max_rms)
                 self._logger.info("PTT ASR batch completed (is_done=True)")
                 break
 
@@ -1815,6 +2322,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         self._logger.info(
                             f"VAD detected silence after speech, auto-committing (rms={rms:.1f})"
                         )
+                        if await try_empty_wake_text_rescue("energy_vad"):
+                            if self._closed:
+                                break
+                            continue
                         fallback_eligible, fallback_ready, fallback_elapsed, fallback_last_loud_age = (
                             self._local_fallback_empty_text_window(
                                 has_speech=has_speech,
@@ -1856,6 +2367,26 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                                         remaining=remaining,
                                         max_rms=max_rms,
                                     )
+                                continue
+                            speech_elapsed = (
+                                time.time() - first_loud_audio_time
+                                if first_loud_audio_time > 0
+                                else 0.0
+                            )
+                            empty_long_remaining = self._empty_long_turn_quiet_remaining(
+                                self._last_non_empty_text,
+                                speech_elapsed,
+                                quiet_elapsed,
+                            )
+                            if empty_long_remaining > 0:
+                                _latency_log(
+                                    "asr_empty_long_turn_defer",
+                                    reason="energy_vad",
+                                    speech_elapsed=round(speech_elapsed, 3),
+                                    quiet=round(quiet_elapsed, 3),
+                                    remaining=round(empty_long_remaining, 3),
+                                    max_rms=round(max_rms, 1),
+                                )
                                 continue
                             if await try_unsafe_short_text_rescue("energy_vad"):
                                 if self._closed:
@@ -1969,6 +2500,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                                 and max_rms >= self._local_fallback_commit_unsafe_min_rms
                             )
                             if should_commit_for_server_final:
+                                if await try_empty_wake_text_rescue(
+                                    "local_fallback_no_safe_text",
+                                ):
+                                    if self._closed:
+                                        break
+                                    continue
                                 if await try_final_open_text_rescue(
                                     "local_fallback_no_safe_text",
                                     last_loud_age=last_loud_age,
@@ -2040,6 +2577,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     hard_elapsed = self._speech_no_text_max_seconds * self._speech_no_text_hard_multiplier
                     if self._speech_no_text_ready_to_rotate(elapsed, last_loud_age):
                         reason = "speech_no_text_timeout"
+                        if await try_empty_wake_text_rescue(reason):
+                            if self._closed:
+                                break
+                            continue
                         if await try_final_open_text_rescue(
                             reason,
                             last_loud_age=last_loud_age,
@@ -2114,6 +2655,33 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                             )
                         await asyncio.sleep(0.01)
                         continue
+                    speech_elapsed = (
+                        time.time() - first_loud_audio_time
+                        if first_loud_audio_time > 0
+                        else 0.0
+                    )
+                    empty_long_remaining = self._empty_long_turn_quiet_remaining(
+                        self._last_non_empty_text,
+                        speech_elapsed,
+                        quiet_elapsed,
+                    )
+                    if empty_long_remaining > 0:
+                        _latency_log(
+                            "asr_empty_long_turn_defer",
+                            reason="audio_idle",
+                            speech_elapsed=round(speech_elapsed, 3),
+                            quiet=round(quiet_elapsed, 3),
+                            remaining=round(empty_long_remaining, 3),
+                            max_rms=round(max_rms, 1),
+                        )
+                        await asyncio.sleep(0.01)
+                        continue
+                    if not self._last_non_empty_text.strip():
+                        if await try_empty_wake_text_rescue("audio_idle"):
+                            if self._closed:
+                                break
+                            await asyncio.sleep(0.01)
+                            continue
                     if await try_unsafe_short_text_rescue("audio_idle"):
                         if self._closed:
                             break
@@ -2376,6 +2944,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         model_name: str | None = None,
         timeout_seconds: float | None = None,
         max_audio_seconds: float | None = None,
+        initial_prompt: str | None = None,
     ) -> str:
         if self._current_batch is None:
             return ""
@@ -2390,6 +2959,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         sample_rate = int(getattr(self._recognizer, "sample_rate", 16000) or 16000)
         flat = np.asarray(audio).reshape(-1)
         effective_model_name = model_name or self._local_fallback_model
+        effective_initial_prompt = (
+            self._local_fallback_initial_prompt
+            if initial_prompt is None
+            else initial_prompt
+        )
         effective_timeout_seconds = (
             timeout_seconds
             if timeout_seconds is not None
@@ -2419,6 +2993,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             max_rms=round(max_rms, 1),
             last_loud_age=round(last_loud_age, 3),
             model=effective_model_name,
+            prompt=bool(effective_initial_prompt),
             allow_open_request=allow_open_request,
         )
         try:
@@ -2430,7 +3005,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     model_name=effective_model_name,
                     cache_dir=self._local_fallback_cache_dir,
                     site_packages=self._local_fallback_site_packages,
-                    initial_prompt=self._local_fallback_initial_prompt,
+                    initial_prompt=effective_initial_prompt,
                 ),
                 timeout=max(0.1, effective_timeout_seconds),
             )

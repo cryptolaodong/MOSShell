@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import hashlib
 
 import orjson as json
 import logging
@@ -65,6 +66,21 @@ def _env_bool(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _normalize_fast_phrase(text: str) -> str:
+    cleaned = (text or "").strip().replace(" ", "").replace("\u3000", "")
+    return cleaned.rstrip("。.!！?？,，;；")
+
+
+def _env_phrase_set(name: str, default: str) -> set[str]:
+    raw = os.environ.get(name, default)
+    phrases: set[str] = set()
+    for item in raw.replace("|", ",").split(","):
+        normalized = _normalize_fast_phrase(item)
+        if normalized:
+            phrases.add(normalized)
+    return phrases
 
 
 ChineseVoiceEmotion = Literal[
@@ -303,6 +319,22 @@ class VolcengineTTSConf(BaseModel):
     macos_say_timeout: float = Field(
         default_factory=lambda: max(1.0, _env_float("MOSS_TTS_MACOS_SAY_TIMEOUT_SECONDS", 8.0)),
         description="Timeout for local macOS say fallback synthesis.",
+    )
+    fast_local_phrase_tts: bool = Field(
+        default_factory=lambda: _env_bool("MOSS_TTS_FAST_LOCAL_PHRASE_ENABLED", True),
+        description="Use cached local macOS say audio for deterministic short fast replies.",
+    )
+    fast_local_phrase_wait: float = Field(
+        default_factory=lambda: max(0.0, _env_float("MOSS_TTS_FAST_LOCAL_PHRASE_WAIT_SECONDS", 0.25)),
+        description="How long to wait for an eligible short reply to be fully committed.",
+    )
+    fast_local_phrase_cache_dir: str = Field(
+        default_factory=lambda: os.environ.get("MOSS_TTS_FAST_LOCAL_PHRASE_CACHE_DIR", "").strip(),
+        description="Optional cache directory for deterministic local short reply audio.",
+    )
+    fast_local_phrase_say_voice: str = Field(
+        default_factory=lambda: os.environ.get("MOSS_TTS_FAST_LOCAL_PHRASE_SAY_VOICE", "").strip(),
+        description="Optional macOS say voice for deterministic local short reply audio.",
     )
 
     speakers: dict[str, SpeakerConf] = Field(
@@ -556,6 +588,10 @@ class VolcengineTTS(TTS):
 
         self._consume_pending_batches_task: Optional[asyncio.Task] = None
         self._default_tts_info = self.get_info()
+        self._fast_local_phrases = _env_phrase_set(
+            "MOSS_TTS_FAST_LOCAL_PHRASES",
+            "在呢。|收到。|我听明白了。",
+        )
 
     def get_info(self) -> TTSInfo:
         return self._conf.to_tts_info(self._current_speaker)
@@ -674,6 +710,8 @@ class VolcengineTTS(TTS):
             if batch.is_closed():
                 # 已经被关闭了.
                 return
+            if await self._try_fast_local_phrase_batch(batch):
+                return
             speaker = batch.speaker()
             # 当前火山的 resource id
             resource_id = speaker.resource_id or self._conf.resource_id
@@ -749,6 +787,116 @@ class VolcengineTTS(TTS):
             self.logger.exception("%s Consume batch loop failed: %s", self._log_prefix, e)
         finally:
             self.logger.info("%s consuming batch loop done", self._log_prefix)
+
+    async def _try_fast_local_phrase_batch(self, batch: VolcengineTTSBatch) -> bool:
+        if not self._conf.fast_local_phrase_tts:
+            return False
+        say_path = shutil.which("say")
+        if not say_path:
+            return False
+        await batch.wait_started()
+        started = asyncio.get_running_loop().time()
+        while not batch.is_committed() and not batch.is_closed():
+            if batch.text_buffer.strip() and asyncio.get_running_loop().time() - started >= self._conf.fast_local_phrase_wait:
+                break
+            if asyncio.get_running_loop().time() - started >= self._conf.fast_local_phrase_wait:
+                break
+            await asyncio.sleep(0.01)
+        text = batch.text_buffer.strip()
+        normalized = _normalize_fast_phrase(text)
+        if not text or normalized not in self._fast_local_phrases:
+            return False
+        if not batch.is_committed():
+            self.logger.debug(
+                "%s fast local phrase skipped because batch is not committed text=%r",
+                self._log_prefix,
+                text,
+            )
+            return False
+        try:
+            audio = await asyncio.to_thread(self._fast_local_phrase_audio, say_path, text, batch)
+            if batch.callback:
+                batch.callback(audio)
+            await batch.append(audio)
+            await batch.close()
+            self.logger.warning(
+                "%s [ReachyLatency] tts_fast_local_phrase text=%r elapsed=%.2fs samples=%d cache=%s",
+                self._log_prefix,
+                text,
+                asyncio.get_running_loop().time() - started,
+                len(audio),
+                self._fast_local_phrase_cache_path(text, batch).name,
+            )
+            return True
+        except Exception as exc:
+            self.logger.exception("%s fast local phrase failed: %s", self._log_prefix, exc)
+            return False
+
+    def _fast_local_phrase_cache_path(self, text: str, batch: VolcengineTTSBatch) -> Path:
+        cache_dir = self._conf.fast_local_phrase_cache_dir.strip()
+        if cache_dir:
+            output_dir = Path(cache_dir).expanduser()
+        else:
+            workspace = Path(os.environ.get("MOSS_WORKSPACE", ".moss_ws"))
+            output_dir = workspace / "runtime" / "tts_fast_cache"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        voice = self._conf.fast_local_phrase_say_voice or self._conf.macos_say_voice
+        key_data = json.dumps(
+            {
+                "text": text,
+                "sample_rate": batch.sample_rate,
+                "voice": voice,
+                "kind": "macos-say-fast-phrase-v1",
+            },
+            option=json.OPT_SORT_KEYS,
+        )
+        digest = hashlib.sha256(key_data).hexdigest()[:24]
+        return output_dir / f"{digest}.wav"
+
+    def _fast_local_phrase_audio(
+            self,
+            say_path: str,
+            text: str,
+            batch: VolcengineTTSBatch,
+    ) -> np.ndarray:
+        wav_path = self._fast_local_phrase_cache_path(text, batch)
+        if not wav_path.exists():
+            tmp_path = wav_path.with_suffix(".tmp.wav")
+            cmd = [
+                say_path,
+                "--file-format=WAVE",
+                f"--data-format=LEI16@{batch.sample_rate}",
+                "-o",
+                str(tmp_path),
+            ]
+            voice = self._conf.fast_local_phrase_say_voice or self._conf.macos_say_voice
+            if voice:
+                cmd.extend(["-v", voice])
+            cmd.append(text)
+            subprocess.run(
+                cmd,
+                check=True,
+                timeout=self._conf.macos_say_timeout,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            tmp_path.replace(wav_path)
+        return self._read_wav_as_int16_mono(wav_path, expected_sample_rate=batch.sample_rate)
+
+    def _read_wav_as_int16_mono(self, path: Path, *, expected_sample_rate: int) -> np.ndarray:
+        with wave.open(str(path), "rb") as wav:
+            channels = wav.getnchannels()
+            sample_width = wav.getsampwidth()
+            sample_rate = wav.getframerate()
+            frames = wav.readframes(wav.getnframes())
+        if sample_width != 2:
+            raise RuntimeError(f"unsupported WAV sample width: {sample_width}")
+        if sample_rate != expected_sample_rate:
+            raise RuntimeError(f"unexpected WAV sample rate: {sample_rate}")
+        audio = np.frombuffer(frames, dtype=np.int16).copy()
+        if channels > 1:
+            audio = audio.reshape(-1, channels).mean(axis=1).astype(np.int16)
+        return audio
 
     async def _fallback_to_macos_say(self, batch: VolcengineTTSBatch, *, reason: str) -> bool:
         if not self._conf.macos_say_fallback:

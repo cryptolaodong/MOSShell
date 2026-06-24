@@ -132,13 +132,22 @@ class _Protocol:
 async def connect(config: VolcanoBigModelASRConfig, connection_id: str = "") -> websockets.ClientConnection:
     config = config.resolve_env()
     connection_id = connection_id or uuid()
+    try:
+        open_timeout = float(os.environ.get("MOSS_ASR_WS_OPEN_TIMEOUT_SECONDS", "4.0"))
+    except Exception:
+        open_timeout = 4.0
+    open_timeout_arg = open_timeout if open_timeout > 0 else None
     headers = {
         "X-Api-App-Key": config.appid,
         "X-Api-Access-Key": config.token,
         "X-Api-Resource-Id": config.resource_id,
         "X-Api-Connect-Id": connection_id,
     }
-    ws = await websockets.connect(config.url, additional_headers=headers)
+    ws = await websockets.connect(
+        config.url,
+        additional_headers=headers,
+        open_timeout=open_timeout_arg,
+    )
     return ws
 
 

@@ -54,6 +54,59 @@ def looks_like_clipped_address_request(
     return any(keyword in normalized for keyword in cleaned_keywords)
 
 
+DEFAULT_ACTIVE_FOLLOWUP_KEYWORDS = (
+    "什么",
+    "怎么",
+    "为什么",
+    "哪里",
+    "哪儿",
+    "哪个",
+    "谁",
+    "多少",
+    "几点",
+    "可以",
+    "能不能",
+    "能",
+    "请",
+    "帮",
+    "回答",
+    "回复",
+    "说",
+    "讲",
+    "解释",
+    "介绍",
+    "继续",
+    "再",
+    "测试",
+    "喜欢",
+    "觉得",
+    "点头",
+    "摇头",
+    "动",
+    "看",
+    "停",
+    "开始",
+    "打开",
+    "关闭",
+)
+
+
+def looks_like_active_followup_request(
+    text: str,
+    *,
+    keywords: Sequence[str] = DEFAULT_ACTIVE_FOLLOWUP_KEYWORDS,
+    min_chars: int = 2,
+    max_chars: int = 90,
+) -> bool:
+    normalized = normalize_voice_text(text)
+    if not normalized or len(normalized) < min_chars or len(normalized) > max_chars:
+        return False
+    if normalized.endswith("吗"):
+        return True
+    cleaned_keywords = tuple(normalize_voice_text(keyword) for keyword in keywords if keyword)
+    return any(keyword and keyword in normalized for keyword in cleaned_keywords)
+
+
 @dataclass(frozen=True)
 class VoiceTurnDecision:
     accept: bool

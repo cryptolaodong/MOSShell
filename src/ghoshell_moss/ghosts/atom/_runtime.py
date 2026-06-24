@@ -70,6 +70,25 @@ _FAST_LATENCY_COMPLETION_GUARDS = (
     "全部说完以后",
     "完整说完以后",
 )
+_FAST_TURN_ACK_GUARDS = (
+    "听明白",
+    "明白了",
+)
+_FAST_TURN_ACK_REQUEST_MARKERS = (
+    "等我",
+    "说完",
+    "全部说完",
+    "完整说完",
+    "不要在中间",
+    "中间停顿",
+    "插话",
+    "抢答",
+    "最后",
+    "只需要",
+    "只要",
+    "回答我",
+    "一句话回答",
+)
 _FAST_OPINION_PATTERNS = ("怎么样", "如何", "好不好")
 _FAST_BRIEF_PATTERNS = (
     "一句话",
@@ -272,6 +291,12 @@ def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
     normalized = _normalize_fast_request_text(text)
     if normalized in _FAST_GREETING_WORDS:
         return "greeting", os.environ.get("MOSS_FAST_GREETING_REPLY", "在呢。")
+    if (
+        len(normalized) <= 90
+        and any(guard in normalized for guard in _FAST_TURN_ACK_GUARDS)
+        and any(marker in normalized for marker in _FAST_TURN_ACK_REQUEST_MARKERS)
+    ):
+        return "turn_ack", os.environ.get("MOSS_FAST_TURN_ACK_REPLY", "我听明白了。")
     if (
         len(normalized) <= 90
         and (

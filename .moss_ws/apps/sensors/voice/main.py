@@ -30,6 +30,7 @@ from ghoshell_moss_contrib.asr.configs import ListenerConfig
 from ghoshell_moss_contrib.asr.voice_turn_gate import (
     VoiceTurnDecision,
     VoiceTurnGate,
+    looks_like_active_followup_request,
     looks_like_clipped_address_request,
 )
 from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
@@ -75,11 +76,29 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_LOCAL_FALLBACK_UNSAFE_DROP_MIN_SECONDS": "1.8",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT": "1",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT_MAX_CHARS": "5",
+        # Empty-wake fallback is too risky for the robot mic: in silent soaks,
+        # local Whisper can hallucinate the prompt into "小白你好" and wake MOSS.
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_ENABLED": "0",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_MIN_RMS": "4500",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_MIN_SECONDS": "0.8",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_QUIET_SECONDS": "0.65",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_MAX_SPEECH_SECONDS": "6.0",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_EXTENDED_MIN_RMS": "5000",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_EXTENDED_MAX_SPEECH_SECONDS": "7.2",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_MIN_ACTIVE_SECONDS": "0.25",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_MAX_ACTIVE_SECONDS": "2.4",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_EXTENDED_MAX_ACTIVE_SECONDS": "6.2",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_MODEL": "tiny",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_PROMPT": "",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_TIMEOUT_SECONDS": "2.5",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_MAX_AUDIO_SECONDS": "4.5",
+        "MOSS_ASR_EMPTY_WAKE_FALLBACK_EXTENDED_MAX_AUDIO_SECONDS": "6.5",
         "MOSS_ASR_FINAL_OPEN_FALLBACK_ENABLED": "1",
         "MOSS_ASR_FINAL_OPEN_FALLBACK_MIN_RMS": "2400",
         "MOSS_ASR_FINAL_OPEN_FALLBACK_MODEL": "base",
         "MOSS_ASR_FINAL_OPEN_FALLBACK_TIMEOUT_SECONDS": "3.5",
         "MOSS_ASR_FINAL_OPEN_FALLBACK_MAX_AUDIO_SECONDS": "8.0",
+        "MOSS_ASR_WS_OPEN_TIMEOUT_SECONDS": "3.0",
         "MOSS_ASR_LONG_STABLE_TEXT_COMMIT_SECONDS": "1.15",
         "MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS": "0.85",
         "MOSS_ASR_LONG_EMPTY_TEXT_COMMIT_SECONDS": "1.8",
@@ -93,6 +112,17 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_FAST_BRIEF_TEMPERATURE": "0.25",
         "MOSS_VOICE_CLIPPED_ADDRESS_RESCUE_ENABLED": "1",
         "MOSS_VOICE_CLIPPED_ADDRESS_MIN_RMS": "3500",
+        "MOSS_VOICE_CLIPPED_ADDRESS_PREFIXES": (
+            "我想,我现在,来测试,请你,请用,请简单,请简短,简单回答,简短回答,"
+            "你觉得,你能,你可以,帮我,给我,机器人为什么,能不能,可以不可以,不要"
+        ),
+        "MOSS_VOICE_CLIPPED_ADDRESS_KEYWORDS": (
+            "回答,一句话,简单,简短,为什么,怎么样,如何,喜欢,颜色,测试,延迟,理解,"
+            "帮,告诉,说,说完,介绍,动,点头,摇头,做什么,能做,会做,抢答,中间,最后,听明白"
+        ),
+        "MOSS_VOICE_ACTIVE_FOLLOWUP_FILTER_ENABLED": "1",
+        "MOSS_VOICE_ACTIVE_FOLLOWUP_MIN_CHARS": "2",
+        "MOSS_VOICE_ACTIVE_FOLLOWUP_MAX_CHARS": "90",
         "MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS": "0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR": "1.0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_MAX_SECONDS": "0",
@@ -474,7 +504,7 @@ async def main(matrix: Matrix) -> None:
         token.strip()
         for token in os.environ.get(
             "MOSS_VOICE_CLIPPED_ADDRESS_PREFIXES",
-            "我想,我现在,请你,请用,请简单,请简短,简单回答,简短回答,你觉得,你能,你可以,帮我,给我,机器人为什么,能不能,可以不可以",
+            "我想,我现在,来测试,请你,请用,请简单,请简短,简单回答,简短回答,你觉得,你能,你可以,帮我,给我,机器人为什么,能不能,可以不可以,不要",
         ).split(",")
         if token.strip()
     )
@@ -482,8 +512,16 @@ async def main(matrix: Matrix) -> None:
         token.strip()
         for token in os.environ.get(
             "MOSS_VOICE_CLIPPED_ADDRESS_KEYWORDS",
-            "回答,一句话,简单,简短,为什么,怎么样,如何,喜欢,颜色,测试,延迟,理解,帮,告诉,说,介绍,动,点头,摇头,做什么,能做,会做",
+            "回答,一句话,简单,简短,为什么,怎么样,如何,喜欢,颜色,测试,延迟,理解,帮,告诉,说,说完,介绍,动,点头,摇头,做什么,能做,会做,抢答,中间,最后,听明白",
         ).split(",")
+        if token.strip()
+    )
+    active_followup_filter_enabled = _truthy_env("MOSS_VOICE_ACTIVE_FOLLOWUP_FILTER_ENABLED", True)
+    active_followup_min_chars = int(os.environ.get("MOSS_VOICE_ACTIVE_FOLLOWUP_MIN_CHARS", "2"))
+    active_followup_max_chars = int(os.environ.get("MOSS_VOICE_ACTIVE_FOLLOWUP_MAX_CHARS", "90"))
+    active_followup_keywords = tuple(
+        token.strip()
+        for token in os.environ.get("MOSS_VOICE_ACTIVE_FOLLOWUP_KEYWORDS", "").split(",")
         if token.strip()
     )
     turn_gate = VoiceTurnGate(
@@ -654,6 +692,26 @@ async def main(matrix: Matrix) -> None:
                     )
                 else:
                     gate_decision = turn_gate.decide_final(text, now)
+                    followup_kwargs = {
+                        "min_chars": active_followup_min_chars,
+                        "max_chars": active_followup_max_chars,
+                    }
+                    if active_followup_keywords:
+                        followup_kwargs["keywords"] = active_followup_keywords
+                    if (
+                        active_followup_filter_enabled
+                        and gate_decision.accept
+                        and gate_decision.reason == "active_followup"
+                        and not looks_like_active_followup_request(text, **followup_kwargs)
+                    ):
+                        gate_decision = VoiceTurnDecision(
+                            accept=False,
+                            reason="active_followup_noise",
+                            addressed=gate_decision.addressed,
+                            active_before=gate_decision.active_before,
+                            active_left_seconds=gate_decision.active_left_seconds,
+                            text_len=gate_decision.text_len,
+                        )
                 if not gate_decision.accept:
                     logger.info("[VoiceInput] drop idle background ASR: text=%r", text[:80])
                     _latency_log(

@@ -1,8 +1,10 @@
 from ghoshell_moss_contrib.asr.async_states import (
+    _combine_open_local_fallback_fragments,
     _canonicalize_open_local_fallback_text,
     _canonicalize_safe_local_fallback_text,
     _is_safe_open_local_fallback_text,
     _is_safe_local_fallback_text,
+    _looks_like_open_local_fallback_prefix_fragment,
     _looks_like_open_request_fragment,
     _looks_like_rescuable_wake_second_pass,
     _looks_like_rescuable_short_wake_fragment,
@@ -63,6 +65,8 @@ def test_safe_local_fallback_rejects_likely_fragments() -> None:
     assert not _is_safe_local_fallback_text("下个月了")
     assert not _is_safe_local_fallback_text("你好")
     assert not _is_safe_local_fallback_text("谢谢你")
+    assert not _is_safe_local_fallback_text("小白你好小白你好")
+    assert not _is_safe_local_fallback_text("小白你好小白你好小白你好小白你好")
 
 
 def test_rescue_prompt_only_allows_wake_like_fragments() -> None:
@@ -102,6 +106,46 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
         "請用聽話解單回答你今天最喜歡什麼字為什麼"
     ).startswith("请用")
     assert _is_safe_open_local_fallback_text("今天最喜欢什么颜色会什么")
+    clipped_turn = "不要在中间停止时候唱话最后持续要说我听你来了"
+    assert _is_safe_open_local_fallback_text(clipped_turn)
+    assert _canonicalize_open_local_fallback_text(clipped_turn).startswith("小白不要在中间")
+    assert _is_safe_open_local_fallback_text(
+        "来测试你会不会抢答，请等我把这句话全部说完以后，再用一句话回答我听明白了。"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "此來測試你會不會強大?新的火把這句話全部說完以後再用一句話回答我聽明白了"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白請不要在中間停頓的時候叉划,最後還需要說我聽明白了"
+    )
+    assert _is_safe_open_local_fallback_text("最後参划,最後只需要說我清明白了")
+
+
+def test_open_local_fallback_combines_split_turn_completion_fragments() -> None:
+    first = "小板請不要在中間停頓的時候叉划,最後"
+    second = "只需要说我听明白了"
+    assert _looks_like_open_local_fallback_prefix_fragment(first)
+    assert not _is_safe_open_local_fallback_text(first)
+    assert not _is_safe_open_local_fallback_text(second)
+    combined = _combine_open_local_fallback_fragments(first, second)
+    assert combined.startswith("小白请不要在中间")
+    assert _is_safe_open_local_fallback_text(combined)
+
+    noisy_first = "小白請不要在中間停滾的時候差跨,最後"
+    noisy_second = "只需要收我心你败了"
+    assert _looks_like_open_local_fallback_prefix_fragment(noisy_first)
+    assert not _is_safe_open_local_fallback_text(noisy_first)
+    noisy_combined = _combine_open_local_fallback_fragments(noisy_first, noisy_second)
+    assert noisy_combined.startswith("小白请不要在中间")
+    assert _is_safe_open_local_fallback_text(noisy_combined)
+
+    clipped_first = "要說一個長句子來自使你會補會強大,請等我把這句話全部收完以後"
+    clipped_second = "再用一句话回答我新明白了"
+    assert _looks_like_open_local_fallback_prefix_fragment(clipped_first)
+    assert not _is_safe_open_local_fallback_text(clipped_first)
+    clipped_combined = _combine_open_local_fallback_fragments(clipped_first, clipped_second)
+    assert clipped_combined.startswith("小白要說")
+    assert _is_safe_open_local_fallback_text(clipped_combined)
 
 
 def test_open_local_fallback_rejects_short_greeting_and_noise() -> None:

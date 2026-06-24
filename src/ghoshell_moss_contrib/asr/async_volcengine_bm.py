@@ -7,6 +7,7 @@
 
 import asyncio
 import json
+import os
 import time
 from collections import deque
 from typing import Optional, Union
@@ -34,6 +35,152 @@ from .volcengine_bm_protocol import (
     FullServerResponse,
     nparray_to_bytes,
 )
+
+
+_ASR_CLOUD_BACKOFF_UNTIL = 0.0
+_ASR_CLOUD_FAILURE_COUNT = 0
+_ASR_CLOUD_LAST_ERROR = ""
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() not in {"0", "false", "no", "off", ""}
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _asr_cloud_circuit_enabled() -> bool:
+    return _env_bool("MOSS_ASR_CLOUD_CIRCUIT_BREAKER_ENABLED", True)
+
+
+def _asr_cloud_circuit_remaining() -> float:
+    if not _asr_cloud_circuit_enabled():
+        return 0.0
+    return max(0.0, _ASR_CLOUD_BACKOFF_UNTIL - time.monotonic())
+
+
+def _is_cloud_open_failure(error: Exception) -> bool:
+    text = str(error).lower()
+    return isinstance(error, (TimeoutError, asyncio.TimeoutError, OSError)) or (
+        "opening handshake" in text or "connect" in text or "timed out" in text
+    )
+
+
+def _mark_asr_cloud_success() -> None:
+    global _ASR_CLOUD_BACKOFF_UNTIL, _ASR_CLOUD_FAILURE_COUNT, _ASR_CLOUD_LAST_ERROR
+    _ASR_CLOUD_BACKOFF_UNTIL = 0.0
+    _ASR_CLOUD_FAILURE_COUNT = 0
+    _ASR_CLOUD_LAST_ERROR = ""
+
+
+def _mark_asr_cloud_failure(error: Exception, logger: LoggerItf | None = None) -> None:
+    global _ASR_CLOUD_BACKOFF_UNTIL, _ASR_CLOUD_FAILURE_COUNT, _ASR_CLOUD_LAST_ERROR
+    if not _asr_cloud_circuit_enabled() or not _is_cloud_open_failure(error):
+        return
+    _ASR_CLOUD_FAILURE_COUNT += 1
+    _ASR_CLOUD_LAST_ERROR = str(error)
+    threshold = max(1, _env_int("MOSS_ASR_CLOUD_CIRCUIT_FAILURE_THRESHOLD", 1))
+    if _ASR_CLOUD_FAILURE_COUNT < threshold:
+        return
+    base_seconds = max(0.0, _env_float("MOSS_ASR_CLOUD_CIRCUIT_BACKOFF_SECONDS", 20.0))
+    max_seconds = max(base_seconds, _env_float("MOSS_ASR_CLOUD_CIRCUIT_BACKOFF_MAX_SECONDS", 60.0))
+    factor = max(1.0, _env_float("MOSS_ASR_CLOUD_CIRCUIT_BACKOFF_FACTOR", 1.5))
+    seconds = min(max_seconds, base_seconds * (factor ** max(0, _ASR_CLOUD_FAILURE_COUNT - threshold)))
+    _ASR_CLOUD_BACKOFF_UNTIL = max(_ASR_CLOUD_BACKOFF_UNTIL, time.monotonic() + seconds)
+    if logger is not None:
+        logger.warning(
+            "ASR cloud circuit open for %.1fs after failure_count=%d error=%s",
+            seconds,
+            _ASR_CLOUD_FAILURE_COUNT,
+            _ASR_CLOUD_LAST_ERROR[:160],
+        )
+
+
+def _reset_asr_cloud_circuit_for_tests() -> None:
+    _mark_asr_cloud_success()
+
+
+class AsyncLocalOnlyRecognitionBatch(AsyncRecognitionBatch):
+    """ASR batch used while the cloud circuit is open.
+
+    It deliberately performs no network I/O while still preserving all buffered
+    audio for the listener state's local Whisper fallback.
+    """
+
+    def __init__(
+        self,
+        *,
+        batch_id: str,
+        logger: LoggerItf,
+        reason: str = "",
+    ):
+        self.batch_id = batch_id or uuid()
+        self.logger = logger
+        self._reason = reason
+        self._audio_buffer: deque[np.ndarray] = deque()
+        self._started = False
+        self._committed = False
+        self._close_event = asyncio.Event()
+
+    async def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self.logger.warning(
+            "Starting local-only ASR batch %s reason=%s",
+            self.batch_id,
+            self._reason[:160],
+        )
+
+    async def close(self, error: Optional[Exception] = None) -> None:
+        if error is not None:
+            self.logger.exception(error)
+        self._close_event.set()
+        self.logger.info(f"Local-only ASR batch {self.batch_id} closed")
+
+    async def buffer(self, audio: np.ndarray) -> None:
+        if self._close_event.is_set():
+            self.logger.warning(f"Buffer closed for local-only batch {self.batch_id}")
+            return
+        self._audio_buffer.append(audio)
+
+    async def commit(self) -> None:
+        if self._committed:
+            return
+        self._committed = True
+        self._close_event.set()
+        self.logger.info(f"Committed local-only ASR batch {self.batch_id}")
+
+    async def get_last_recognition(self) -> Optional[Recognition]:
+        return None
+
+    async def get_buffer(self) -> np.ndarray:
+        if not self._audio_buffer:
+            return np.array([], dtype=np.int16)
+        return np.concatenate(list(self._audio_buffer))
+
+    async def is_done(self) -> bool:
+        return self._close_event.is_set()
+
+    async def wait_until_done(self, timeout: Optional[float] = None) -> None:
+        try:
+            await asyncio.wait_for(self._close_event.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            pass
 
 
 class AsyncVocEngineBigModelStreamASRBatch(AsyncRecognitionBatch):
@@ -87,6 +234,7 @@ class AsyncVocEngineBigModelStreamASRBatch(AsyncRecognitionBatch):
 
         try:
             async with (await connect(self.config, self.batch_id)) as ws:
+                _mark_asr_cloud_success()
                 uid = self.batch_id
                 await send_init_request(ws, self.config, uid, vad=self._vad)
 
@@ -127,6 +275,7 @@ class AsyncVocEngineBigModelStreamASRBatch(AsyncRecognitionBatch):
         except websockets.exceptions.ConnectionClosed as e:
             self.logger.info(f"Connection closed: {e}")
         except Exception as e:
+            _mark_asr_cloud_failure(e, self.logger)
             self.logger.exception(e)
             await self.callback.on_error(f"ASR batch error: {e}")
         finally:
@@ -427,6 +576,19 @@ class AsyncVocEngineBigModelASR(AsyncRecognizer):
     ) -> AsyncRecognitionBatch:
         if callback is None:
             callback = AsyncLoggerCallback(self.logger)
+
+        cloud_remaining = _asr_cloud_circuit_remaining()
+        if cloud_remaining > 0.0:
+            self.logger.warning(
+                "ASR cloud circuit still open for %.1fs; creating local-only batch reason=%s",
+                cloud_remaining,
+                _ASR_CLOUD_LAST_ERROR[:160],
+            )
+            return AsyncLocalOnlyRecognitionBatch(
+                batch_id=batch_id,
+                logger=self.logger,
+                reason=_ASR_CLOUD_LAST_ERROR,
+            )
 
         return AsyncVocEngineBigModelStreamASRBatch(
             callback=callback,

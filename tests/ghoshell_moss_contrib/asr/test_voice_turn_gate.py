@@ -1,5 +1,6 @@
 from ghoshell_moss_contrib.asr.voice_turn_gate import (
     VoiceTurnGate,
+    looks_like_active_followup_request,
     looks_like_clipped_address_request,
 )
 
@@ -92,8 +93,8 @@ def test_idle_partial_commit_is_explicitly_configured() -> None:
 
 
 def test_clipped_address_request_rescue_matches_explicit_requests() -> None:
-    prefixes = ("我想", "请你", "请用", "你能")
-    keywords = ("测试", "回答", "做什么")
+    prefixes = ("我想", "请你", "请用", "你能", "来测试", "不要")
+    keywords = ("测试", "回答", "做什么", "说完", "最后")
 
     assert looks_like_clipped_address_request(
         "我想测试一下长句子的理解和延迟，请你用一句话回答我",
@@ -110,6 +111,16 @@ def test_clipped_address_request_rescue_matches_explicit_requests() -> None:
         prefixes=prefixes,
         keywords=keywords,
     )
+    assert looks_like_clipped_address_request(
+        "来测试你会不会抢答，请等我把这句话全部说完以后，再用一句话回答我听明白了。",
+        prefixes=prefixes,
+        keywords=keywords,
+    )
+    assert looks_like_clipped_address_request(
+        "不要在中间停止时候唱话最后持续要说我听你来了",
+        prefixes=prefixes,
+        keywords=keywords,
+    )
     assert not looks_like_clipped_address_request(
         "你好",
         prefixes=prefixes,
@@ -120,3 +131,14 @@ def test_clipped_address_request_rescue_matches_explicit_requests() -> None:
         prefixes=prefixes,
         keywords=keywords,
     )
+
+
+def test_active_followup_request_filter_rejects_short_noise() -> None:
+    assert looks_like_active_followup_request("你现在能做什么")
+    assert looks_like_active_followup_request("继续")
+    assert looks_like_active_followup_request("请再说一遍")
+    assert looks_like_active_followup_request("动动脑袋")
+
+    assert not looks_like_active_followup_request("感谢你长得")
+    assert not looks_like_active_followup_request("水水水水水")
+    assert not looks_like_active_followup_request("你好")
