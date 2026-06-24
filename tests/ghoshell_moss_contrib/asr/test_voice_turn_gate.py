@@ -2,6 +2,7 @@ from ghoshell_moss_contrib.asr.voice_turn_gate import (
     VoiceTurnGate,
     looks_like_active_followup_request,
     looks_like_clipped_address_request,
+    looks_like_prefix_only_greeting,
 )
 
 
@@ -142,3 +143,16 @@ def test_active_followup_request_filter_rejects_short_noise() -> None:
     assert not looks_like_active_followup_request("感谢你长得")
     assert not looks_like_active_followup_request("水水水水水")
     assert not looks_like_active_followup_request("你好")
+
+
+def test_prefix_only_greeting_matches_short_wake_phrases_only() -> None:
+    assert looks_like_prefix_only_greeting("小白")
+    assert looks_like_prefix_only_greeting("小白你好")
+    assert looks_like_prefix_only_greeting("你好，小白")
+    assert looks_like_prefix_only_greeting("小白在吗")
+    assert looks_like_prefix_only_greeting("小白你在吗")
+
+    assert not looks_like_prefix_only_greeting("你好")
+    assert not looks_like_prefix_only_greeting("小白你现在能做什么")
+    assert not looks_like_prefix_only_greeting("小白请你动动脑袋")
+    assert not looks_like_prefix_only_greeting("小白你好你现在能做什么")

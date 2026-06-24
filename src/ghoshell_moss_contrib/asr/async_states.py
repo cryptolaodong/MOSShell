@@ -712,6 +712,31 @@ def _latency_log(event: str, **fields) -> None:
         pass
 
 
+_RECENT_ASR_VOICE_ACTIVITY = {
+    "gate_open_ts": 0.0,
+    "last_loud_ts": 0.0,
+    "rms": 0.0,
+}
+
+
+def _mark_asr_input_gate_open(timestamp: float, rms: float) -> None:
+    _RECENT_ASR_VOICE_ACTIVITY["gate_open_ts"] = float(timestamp)
+    _RECENT_ASR_VOICE_ACTIVITY["last_loud_ts"] = max(
+        float(_RECENT_ASR_VOICE_ACTIVITY.get("last_loud_ts") or 0.0),
+        float(timestamp),
+    )
+    _RECENT_ASR_VOICE_ACTIVITY["rms"] = float(rms)
+
+
+def _mark_asr_voice_activity(timestamp: float, rms: float) -> None:
+    _RECENT_ASR_VOICE_ACTIVITY["last_loud_ts"] = float(timestamp)
+    _RECENT_ASR_VOICE_ACTIVITY["rms"] = float(rms)
+
+
+def recent_asr_voice_activity() -> dict[str, float]:
+    return dict(_RECENT_ASR_VOICE_ACTIVITY)
+
+
 class AsyncAudioInputLoop:
     """
     异步音频输入循环。
@@ -2283,6 +2308,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                                     preroll_frames=len(preroll),
                                     confirmed_frames=input_gate_loud_frames,
                                 )
+                                _mark_asr_input_gate_open(last_audio_time, rms)
                                 if self._current_batch:
                                     for frame in list(preroll)[:-1]:
                                         await self._current_batch.buffer(frame)
@@ -2307,6 +2333,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     if not has_speech:
                         first_loud_audio_time = last_audio_time
                     last_loud_audio_time = last_audio_time
+                    _mark_asr_voice_activity(last_audio_time, rms)
                     has_speech = True
                 if should_send_audio and self._current_batch:
                     await self._current_batch.buffer(audio_data)

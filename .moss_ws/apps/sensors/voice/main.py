@@ -26,12 +26,14 @@ from ghoshell_moss_contrib.asr.async_concepts import (
     Recognition,
 )
 from ghoshell_moss_contrib.asr.async_listener_service import AsyncListenerServiceImpl
+from ghoshell_moss_contrib.asr.async_states import recent_asr_voice_activity
 from ghoshell_moss_contrib.asr.configs import ListenerConfig
 from ghoshell_moss_contrib.asr.voice_turn_gate import (
     VoiceTurnDecision,
     VoiceTurnGate,
     looks_like_active_followup_request,
     looks_like_clipped_address_request,
+    looks_like_prefix_only_greeting,
 )
 from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
     is_speaking as robot_is_speaking,
@@ -67,7 +69,7 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_LOCAL_FALLBACK_INITIAL_PROMPT": "",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_PROMPT": "小白你好",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_MODEL": "base",
-        "MOSS_VOICE_ADDRESS_WORDS": "小白,蒋白",
+        "MOSS_VOICE_ADDRESS_WORDS": "小白,蒋白,小伙伴",
         "MOSS_ASR_LOCAL_FALLBACK_MIN_RMS": "1800",
         "MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS": "0.9",
         "MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS": "0.85",
@@ -145,6 +147,10 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_VOICE_SAVE_REJECTED_ASR_AUDIO": "1",
         "MOSS_VOICE_REJECTED_ASR_AUDIO_MIN_RMS": "1800",
         "MOSS_VOICE_WAKE_RECOVERY_MIN_RMS": "1800",
+        "MOSS_VOICE_PREFIX_GREETING_HOLD_SECONDS": "0.85",
+        "MOSS_VOICE_PREFIX_GREETING_MAX_HOLD_SECONDS": "3.6",
+        "MOSS_VOICE_PREFIX_GREETING_ACTIVITY_QUIET_SECONDS": "1.8",
+        "MOSS_VOICE_PREFIX_GREETING_CONTINUATION_MIN_RMS": "900",
     }
     applied: dict[str, str] = {}
     for name, value in defaults.items():
@@ -562,6 +568,26 @@ async def main(matrix: Matrix) -> None:
         idle_partial_seconds=idle_partial_seconds,
     )
     _wake_recovery = {"until": 0.0, "reason": "", "rms": 0.0}
+    prefix_greeting_hold_seconds = float(os.environ.get("MOSS_VOICE_PREFIX_GREETING_HOLD_SECONDS", "0"))
+    prefix_greeting_max_hold_seconds = float(
+        os.environ.get("MOSS_VOICE_PREFIX_GREETING_MAX_HOLD_SECONDS", "3.6")
+    )
+    prefix_greeting_activity_quiet_seconds = float(
+        os.environ.get("MOSS_VOICE_PREFIX_GREETING_ACTIVITY_QUIET_SECONDS", "1.0")
+    )
+    prefix_greeting_continuation_min_rms = float(
+        os.environ.get("MOSS_VOICE_PREFIX_GREETING_CONTINUATION_MIN_RMS", "900")
+    )
+    _pending_prefix_greeting = {
+        "task": None,
+        "key": "",
+        "text": "",
+        "ts": 0.0,
+        "epoch": 0.0,
+        "saw_activity": False,
+        "activity_rms": 0.0,
+    }
+    _released_prefix_greetings: set[str] = set()
     control_file = Path(os.environ.get("MOSS_VOICE_CONTROL_FILE", "/private/tmp/moss_voice_control.json"))
     _control = {"mtime": 0.0}
     save_empty_audio = _truthy_env("MOSS_VOICE_SAVE_EMPTY_ASR_AUDIO", True)
@@ -605,6 +631,56 @@ async def main(matrix: Matrix) -> None:
             return False
         return any(token in normalized for token in wake_recovery_tokens)
 
+    def _prefix_greeting_release_key(result: Recognition, text: str) -> str:
+        return "|".join(
+            (
+                str(getattr(result, "batch_id", "") or ""),
+                str(getattr(result, "created", "") or ""),
+                str(result.commit_reason or ""),
+                text,
+            )
+        )
+
+    def _looks_like_prefix_greeting_continuation(text: str) -> bool:
+        followup_kwargs = {
+            "min_chars": active_followup_min_chars,
+            "max_chars": active_followup_max_chars,
+        }
+        if active_followup_keywords:
+            followup_kwargs["keywords"] = active_followup_keywords
+        return (
+            _is_wake_recovery_followup_text(text)
+            or looks_like_active_followup_request(text, **followup_kwargs)
+            or looks_like_clipped_address_request(
+                text,
+                prefixes=clipped_address_prefixes,
+                keywords=clipped_address_keywords,
+            )
+        )
+
+    def _cancel_pending_prefix_greeting(reason: str, text: str, audio_max_rms: float) -> None:
+        task = _pending_prefix_greeting.get("task")
+        if isinstance(task, asyncio.Task) and not task.done():
+            task.cancel()
+            _latency_log(
+                "voice_prefix_greeting_hold_cancel",
+                reason=reason,
+                pending_text=str(_pending_prefix_greeting.get("text") or "")[:40],
+                text_preview=text[:40],
+                audio_max_rms=round(audio_max_rms, 1),
+            )
+        _pending_prefix_greeting.update(
+            {
+                "task": None,
+                "key": "",
+                "text": "",
+                "ts": 0.0,
+                "epoch": 0.0,
+                "saw_activity": False,
+                "activity_rms": 0.0,
+            }
+        )
+
     class VoiceCallback(AsyncListenerCallback):
         async def on_recognition(self, result: Recognition):
             if not result.text or not result.text.strip():
@@ -630,6 +706,26 @@ async def main(matrix: Matrix) -> None:
                 now = _time.monotonic()
                 is_local_fallback = (result.commit_reason or "").startswith("local_whisper")
                 audio_max_rms = float(getattr(result, "audio_max_rms", 0.0) or 0.0)
+                release_key = _prefix_greeting_release_key(result, text)
+                released_prefix_greeting = release_key in _released_prefix_greetings
+                pending_task = _pending_prefix_greeting.get("task")
+                pending_prefix_active = isinstance(pending_task, asyncio.Task) and not pending_task.done()
+                if (
+                    pending_prefix_active
+                    and not released_prefix_greeting
+                    and not looks_like_prefix_only_greeting(text, address_words=address_words)
+                    and audio_max_rms >= prefix_greeting_continuation_min_rms
+                    and _looks_like_prefix_greeting_continuation(text)
+                ):
+                    _cancel_pending_prefix_greeting("continuation", text, audio_max_rms)
+                    turn_gate.open_followup_window(now)
+                    _latency_log(
+                        "voice_prefix_greeting_continuation_accept",
+                        text_len=len(text),
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        min_rms=round(prefix_greeting_continuation_min_rms, 1),
+                    )
                 addressed_before = turn_gate.is_addressed(text)
                 active_left_before = turn_gate.active_left(now)
                 active_before = active_left_before > 0
@@ -671,6 +767,129 @@ async def main(matrix: Matrix) -> None:
                         else local_fallback_followup_min_rms
                     )
                     weak_local_fallback = audio_max_rms > 0 and audio_max_rms < min_rms
+                if (
+                    prefix_greeting_hold_seconds > 0
+                    and is_local_fallback
+                    and not released_prefix_greeting
+                    and not active_before
+                    and not recovery_allowed
+                    and not clipped_address_allowed
+                    and not weak_local_fallback
+                    and audio_max_rms >= local_fallback_address_min_rms
+                    and looks_like_prefix_only_greeting(text, address_words=address_words)
+                ):
+                    if pending_prefix_active:
+                        _cancel_pending_prefix_greeting("replace", text, audio_max_rms)
+
+                    async def _release_prefix_greeting() -> None:
+                        try:
+                            await asyncio.sleep(prefix_greeting_hold_seconds)
+                            hold_started_epoch = float(_pending_prefix_greeting.get("epoch") or 0.0)
+                            deadline = hold_started_epoch + max(
+                                prefix_greeting_hold_seconds,
+                                prefix_greeting_max_hold_seconds,
+                            )
+                            while hold_started_epoch > 0 and time.time() < deadline:
+                                activity = recent_asr_voice_activity()
+                                last_activity = max(
+                                    float(activity.get("gate_open_ts") or 0.0),
+                                    float(activity.get("last_loud_ts") or 0.0),
+                                )
+                                activity_age = time.time() - last_activity if last_activity > 0 else 999.0
+                                if (
+                                    last_activity <= hold_started_epoch
+                                    or activity_age >= prefix_greeting_activity_quiet_seconds
+                                ):
+                                    break
+                                _pending_prefix_greeting["saw_activity"] = True
+                                _pending_prefix_greeting["activity_rms"] = max(
+                                    float(_pending_prefix_greeting.get("activity_rms") or 0.0),
+                                    float(activity.get("rms") or 0.0),
+                                )
+                                sleep_for = min(0.25, max(0.05, deadline - time.time()))
+                                _latency_log(
+                                    "voice_prefix_greeting_hold_extend",
+                                    activity_age=round(activity_age, 3),
+                                    max_hold_seconds=round(prefix_greeting_max_hold_seconds, 3),
+                                    quiet_seconds=round(prefix_greeting_activity_quiet_seconds, 3),
+                                    sleep_for=round(sleep_for, 3),
+                                    text_preview=text[:40],
+                                    audio_max_rms=round(float(activity.get("rms") or 0.0), 1),
+                                )
+                                await asyncio.sleep(sleep_for)
+                        except asyncio.CancelledError:
+                            return
+                        if _pending_prefix_greeting.get("key") != release_key:
+                            return
+                        if bool(_pending_prefix_greeting.get("saw_activity")):
+                            activity_rms = float(_pending_prefix_greeting.get("activity_rms") or audio_max_rms)
+                            _pending_prefix_greeting.update(
+                                {
+                                    "task": None,
+                                    "key": "",
+                                    "text": "",
+                                    "ts": 0.0,
+                                    "epoch": 0.0,
+                                    "saw_activity": False,
+                                    "activity_rms": 0.0,
+                                }
+                            )
+                            _wake_recovery["until"] = _time.monotonic() + wake_recovery_seconds
+                            _wake_recovery["reason"] = "prefix_greeting_continuation_no_safe_text"
+                            _wake_recovery["rms"] = max(audio_max_rms, activity_rms)
+                            _latency_log(
+                                "voice_prefix_greeting_hold_drop_after_activity",
+                                hold_seconds=round(prefix_greeting_hold_seconds, 3),
+                                max_hold_seconds=round(prefix_greeting_max_hold_seconds, 3),
+                                text_preview=text[:40],
+                                audio_max_rms=round(audio_max_rms, 1),
+                                activity_rms=round(activity_rms, 1),
+                                recovery_seconds=round(wake_recovery_seconds, 3),
+                            )
+                            return
+                        _pending_prefix_greeting.update(
+                            {
+                                "task": None,
+                                "key": "",
+                                "text": "",
+                                "ts": 0.0,
+                                "epoch": 0.0,
+                                "saw_activity": False,
+                                "activity_rms": 0.0,
+                            }
+                        )
+                        _released_prefix_greetings.add(release_key)
+                        _latency_log(
+                            "voice_prefix_greeting_hold_release",
+                            hold_seconds=round(prefix_greeting_hold_seconds, 3),
+                            text_preview=text[:40],
+                            audio_max_rms=round(audio_max_rms, 1),
+                        )
+                        try:
+                            await self.on_recognition(result)
+                        finally:
+                            _released_prefix_greetings.discard(release_key)
+
+                    task = asyncio.create_task(_release_prefix_greeting())
+                    _pending_prefix_greeting.update(
+                        {
+                            "task": task,
+                            "key": release_key,
+                            "text": text,
+                            "ts": now,
+                            "epoch": time.time(),
+                            "saw_activity": False,
+                            "activity_rms": 0.0,
+                        }
+                    )
+                    _latency_log(
+                        "voice_prefix_greeting_hold",
+                        hold_seconds=round(prefix_greeting_hold_seconds, 3),
+                        text_len=len(text),
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                    )
+                    return
                 if weak_local_fallback:
                     turn_gate.reset_idle_partial()
                     gate_decision = VoiceTurnDecision(

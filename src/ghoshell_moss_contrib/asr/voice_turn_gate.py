@@ -107,6 +107,32 @@ def looks_like_active_followup_request(
     return any(keyword and keyword in normalized for keyword in cleaned_keywords)
 
 
+def looks_like_prefix_only_greeting(
+    text: str,
+    *,
+    address_words: Sequence[str] = ("小白",),
+) -> bool:
+    normalized = normalize_voice_text(text)
+    if not normalized or len(normalized) > 8:
+        return False
+    cleaned_addresses = tuple(normalize_voice_text(word) for word in address_words if word)
+    for address in cleaned_addresses:
+        if not address:
+            continue
+        if normalized in {
+            address,
+            f"{address}你好",
+            f"你好{address}",
+            f"{address}在吗",
+            f"{address}在不在",
+            f"{address}你在吗",
+            f"{address}听见吗",
+            f"{address}能听见吗",
+        }:
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class VoiceTurnDecision:
     accept: bool
