@@ -82,3 +82,23 @@ async def test_cloud_circuit_uses_local_only_batch_with_audio_buffer(monkeypatch
         assert await batch.is_done()
     finally:
         _reset_asr_cloud_circuit_for_tests()
+
+
+@pytest.mark.asyncio
+async def test_force_local_only_batch_with_audio_buffer(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_FORCE_LOCAL_ONLY", "1")
+    _reset_asr_cloud_circuit_for_tests()
+    recognizer = AsyncVocEngineBigModelASR(
+        config=VolcanoBigModelASRConfig(),
+        logger=_Logger(),
+        callback=_Callback(),
+    )
+
+    batch = await recognizer.new_batch(callback=_Callback(), batch_id="forced-local")
+    assert isinstance(batch, AsyncLocalOnlyRecognitionBatch)
+
+    audio = np.arange(800, dtype=np.int16)
+    await batch.start()
+    await batch.buffer(audio)
+    buffered = await batch.get_buffer()
+    assert np.array_equal(buffered, audio)

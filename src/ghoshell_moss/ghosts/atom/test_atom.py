@@ -357,6 +357,16 @@ class TestAdapter:
         )
         assert clipped_mis_asr_kind == "latency_probe"
         assert clipped_mis_asr_reply == "我会等你说完，再简短回答。"
+        reachy_base_kind, reachy_base_reply = _simple_fast_reply_with_kind(
+            "想白我想測試一下長句子的理解和言直请你等我把这句话全部說完以后再一迷句话回答我"
+        )
+        assert reachy_base_kind == "latency_probe"
+        assert reachy_base_reply == "我会等你说完，再简短回答。"
+        reachy_actual_kind, reachy_actual_reply = _simple_fast_reply_with_kind(
+            "小白我想測試一下長句子的理解和延遲请你等我把这句话全部收完以后再一迷句话回答我"
+        )
+        assert reachy_actual_kind == "latency_probe"
+        assert reachy_actual_reply == "我会等你说完，再简短回答。"
 
     def test_simple_fast_reply_for_turn_ack(self):
         from ._runtime import _simple_fast_reply_with_kind

@@ -73,7 +73,7 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS": "0.85",
         "MOSS_ASR_LOCAL_FALLBACK_TIMEOUT_SECONDS": "3.0",
         "MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS": "2.4",
-        "MOSS_ASR_LOCAL_FALLBACK_COMMIT_UNSAFE_MIN_RMS": "2000",
+        "MOSS_ASR_LOCAL_FALLBACK_COMMIT_UNSAFE_MIN_RMS": "0",
         "MOSS_ASR_LOCAL_FALLBACK_MAX_ATTEMPTS": "2",
         "MOSS_ASR_LOCAL_FALLBACK_RETRY_DELAY_SECONDS": "0.45",
         "MOSS_ASR_LOCAL_FALLBACK_UNSAFE_DROP_MIN_SECONDS": "1.8",
@@ -101,6 +101,7 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_FINAL_OPEN_FALLBACK_MODEL": "base",
         "MOSS_ASR_FINAL_OPEN_FALLBACK_TIMEOUT_SECONDS": "3.5",
         "MOSS_ASR_FINAL_OPEN_FALLBACK_MAX_AUDIO_SECONDS": "8.0",
+        "MOSS_ASR_FORCE_LOCAL_ONLY": "1",
         "MOSS_ASR_WS_OPEN_TIMEOUT_SECONDS": "3.0",
         "MOSS_ASR_LONG_STABLE_TEXT_COMMIT_SECONDS": "1.15",
         "MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS": "0.85",
@@ -129,10 +130,10 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS": "0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR": "1.0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_MAX_SECONDS": "0",
-        # The Reachy robot mic is quieter than the Mac loopback baseline. Keep
-        # semantic wake gating strict, but let short "小白你好" turns enter ASR.
-        "MOSS_ASR_ENERGY_SPEECH_RMS": "800",
-        "MOSS_ASR_INPUT_GATE_RMS": "800",
+        # Keep low room/mechanical noise out of ASR. Unsafe local fallback is
+        # diagnostic-only, so uncertain audio cannot become a fake user turn.
+        "MOSS_ASR_ENERGY_SPEECH_RMS": "1200",
+        "MOSS_ASR_INPUT_GATE_RMS": "1200",
         "MOSS_ASR_INPUT_GATE_OPEN_FRAMES": "1",
         "MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS": "5.5",
         "MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS": "1.25",

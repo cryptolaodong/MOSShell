@@ -295,6 +295,9 @@ def _canonicalize_safe_local_fallback_text(text: str) -> str:
     }
     if normalized in exact_homophones:
         return exact_homophones[normalized]
+    for prefix in ("一个", "二个", "两个", "这个", "那个"):
+        if normalized == f"{prefix}小白你好":
+            return "小白你好"
     if _looks_like_short_wake_greeting(normalized):
         return "小白你好"
     wake_homophones = ("想掰", "想把", "想法", "小拜", "小摆", "小百", "小班")

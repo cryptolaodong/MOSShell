@@ -644,6 +644,56 @@ async def test_high_energy_unsafe_local_fallback_commits_for_server_final(monkey
 
 
 @pytest.mark.asyncio
+async def test_unsafe_local_fallback_drops_when_no_commit_threshold(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_DROP_UNSAFE", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MAX_ATTEMPTS", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_COMMIT_UNSAFE_MIN_RMS", "0")
+    monkeypatch.setenv("MOSS_ASR_INPUT_GATE_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", "10")
+
+    clock = _Clock()
+    monkeypatch.setattr(async_states.time, "time", clock.time)
+
+    callback = _Callback()
+    batch = _Batch()
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=callback,
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(clock),
+    )
+    state._current_batch = batch
+    state._batch_started_at = clock.time()
+
+    fallback_calls = []
+
+    async def _try_local_fallback(*, reason: str, max_rms: float, last_loud_age: float) -> str:
+        fallback_calls.append((reason, max_rms, last_loud_age))
+        return ""
+
+    state._try_local_fallback = _try_local_fallback
+
+    loud = np.full(1600, 2000, dtype=np.int16)
+    quiet = np.zeros(1600, dtype=np.int16)
+
+    await state._process_audio_batch(deque([loud, quiet]))
+
+    assert len(fallback_calls) == 1
+    assert batch.commits == 0
+    assert not state._commit_reason
+    assert len(callback.saved_batches) == 1
+    assert callback.saved_batches[0][0].commit_reason == "local_fallback_no_safe_text"
+
+
+@pytest.mark.asyncio
 async def test_auto_commit_propagates_audio_max_rms_to_final_recognition() -> None:
     callback = _Callback()
     state = AsyncPdtListeningState(

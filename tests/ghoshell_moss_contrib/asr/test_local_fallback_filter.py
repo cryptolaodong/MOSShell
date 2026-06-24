@@ -44,6 +44,7 @@ def test_safe_local_fallback_canonicalizes_wake_homophone() -> None:
     assert _canonicalize_safe_local_fallback_text("做完你好") == "小白你好"
     assert _canonicalize_safe_local_fallback_text("小白天啊") == "小白你好"
     assert _canonicalize_safe_local_fallback_text("希望拜你好") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("二个小白你好") == "小白你好"
 
 
 def test_safe_local_fallback_canonicalizes_noisy_ability_question() -> None:
@@ -69,6 +70,7 @@ def test_safe_local_fallback_rejects_likely_fragments() -> None:
     assert not _is_safe_local_fallback_text("谢谢你")
     assert not _is_safe_local_fallback_text("小白你好小白你好")
     assert not _is_safe_local_fallback_text("小白你好小白你好小白你好小白你好")
+    assert not _is_safe_local_fallback_text("你不在这儿怎么办一件事")
 
 
 def test_rescue_prompt_only_allows_wake_like_fragments() -> None:

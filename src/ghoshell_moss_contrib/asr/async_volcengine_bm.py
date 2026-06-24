@@ -67,6 +67,10 @@ def _asr_cloud_circuit_enabled() -> bool:
     return _env_bool("MOSS_ASR_CLOUD_CIRCUIT_BREAKER_ENABLED", True)
 
 
+def _asr_force_local_only() -> bool:
+    return _env_bool("MOSS_ASR_FORCE_LOCAL_ONLY", False)
+
+
 def _asr_cloud_circuit_remaining() -> float:
     if not _asr_cloud_circuit_enabled():
         return 0.0
@@ -576,6 +580,14 @@ class AsyncVocEngineBigModelASR(AsyncRecognizer):
     ) -> AsyncRecognitionBatch:
         if callback is None:
             callback = AsyncLoggerCallback(self.logger)
+
+        if _asr_force_local_only():
+            self.logger.warning("ASR force-local-only enabled; creating local-only batch")
+            return AsyncLocalOnlyRecognitionBatch(
+                batch_id=batch_id,
+                logger=self.logger,
+                reason="force_local_only",
+            )
 
         cloud_remaining = _asr_cloud_circuit_remaining()
         if cloud_remaining > 0.0:
