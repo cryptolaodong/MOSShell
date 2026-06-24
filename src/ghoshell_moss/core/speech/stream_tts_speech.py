@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 from typing import Optional, Callable, Coroutine
 
 import numpy as np
@@ -50,6 +51,13 @@ class TTSSpeechStream(SpeechStream):
         self._closed_event = ThreadSafeEvent()
         self._has_audio_data = False
         self._log_prefix = "[TTSSpeechStream id=%s] " % batch_id
+
+    @staticmethod
+    def _close_playback_grace_seconds() -> float:
+        try:
+            return max(0.0, float(os.environ.get("MOSS_TTS_CLOSE_PLAYBACK_GRACE_SECONDS", "2.0")))
+        except (TypeError, ValueError):
+            return 2.0
 
     def _buffer(self, text: str) -> None:
         self._text_buffer += text
@@ -141,11 +149,33 @@ class TTSSpeechStream(SpeechStream):
         self.logger.info("%s close TTS stream", self._log_prefix)
         if self._playing_loop_task is not None:
             if not self._playing_loop_task.done():
-                self._playing_loop_task.cancel()
+                grace_seconds = self._close_playback_grace_seconds()
                 try:
-                    await self._playing_loop_task
-                except asyncio.CancelledError:
-                    pass
+                    player_active = self._player.is_playing()
+                except Exception:
+                    player_active = False
+                if player_active and grace_seconds > 0.0:
+                    self.logger.info(
+                        "%s close requested while player active; waiting up to %.2fs",
+                        self._log_prefix,
+                        grace_seconds,
+                    )
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(self._playing_loop_task),
+                            timeout=grace_seconds,
+                        )
+                    except asyncio.TimeoutError:
+                        self.logger.warning(
+                            "%s playback grace timed out; clearing player",
+                            self._log_prefix,
+                        )
+                if not self._playing_loop_task.done():
+                    self._playing_loop_task.cancel()
+                    try:
+                        await self._playing_loop_task
+                    except asyncio.CancelledError:
+                        pass
             else:
                 try:
                     await self._playing_loop_task

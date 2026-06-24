@@ -136,6 +136,8 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         self._generation = 0
         self._play_done_event = ThreadSafeEvent()
         self._play_done_event.set()
+        self._worker_idle_event = ThreadSafeEvent()
+        self._worker_idle_event.set()
         self._estimated_end_time = 0.0
         self._next_play_monotonic = 0.0
         self._closed = False
@@ -171,6 +173,7 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
             generation = self._generation
         self._drain_work_queue()
         self._work_queue.put_nowait(([], True, generation))
+        self._worker_idle_event.set()
         clear_speaking()
         if self._current_upload_id:
             try:
@@ -200,7 +203,9 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         """
         with self._buffer_lock:
             self._audio_buffer.clear()
+            self._generation += 1
         self._drain_work_queue()
+        self._worker_idle_event.set()
         clear_speech_pending()
         self._play_done_event.set()
         self.logger.info("%s stream finished", self._log_prefix)
@@ -230,6 +235,7 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
 
         with self._buffer_lock:
             self._audio_buffer.append(audio_data)
+        self._worker_idle_event.clear()
 
         if self._play_done_event.is_set():
             self._play_done_event.clear()
@@ -266,7 +272,23 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                 break
             await asyncio.sleep(min(0.1, time_to_wait))
 
-        await self._play_done_event.wait()
+        while True:
+            await self._play_done_event.wait()
+            await self._worker_idle_event.wait()
+            with self._buffer_lock:
+                live_buffer_empty = not self._audio_buffer
+            if live_buffer_empty and self._work_queue.empty():
+                wall_remaining = (self._estimated_end_time + self._safety_delay) - time.time()
+                play_remaining = self._next_play_monotonic - time.monotonic()
+                time_to_wait = max(wall_remaining, play_remaining)
+                if time_to_wait > 0.0:
+                    await asyncio.sleep(min(0.1, time_to_wait))
+                    continue
+                break
+            self._play_done_event.clear()
+            self._worker_idle_event.clear()
+            self._flush_buffer(force=True)
+
         self.logger.info("%s play done", self._log_prefix)
         return True
 
@@ -295,6 +317,8 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
             frames = self._audio_buffer.copy()
             self._audio_buffer.clear()
             generation = self._generation
+        if frames or force:
+            self._worker_idle_event.clear()
         self._work_queue.put_nowait((frames, force, generation))
 
     def _drain_work_queue(self) -> None:
@@ -324,11 +348,19 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                     pending_generation = self._generation
                 pending_frames.extend(self._audio_buffer)
                 self._audio_buffer.clear()
+                self._worker_idle_event.clear()
                 last_buffered_at = time.time()
+
+        def mark_idle_if_drained() -> None:
+            with self._buffer_lock:
+                live_buffer_empty = not self._audio_buffer
+            if not pending_frames and live_buffer_empty and self._work_queue.empty():
+                self._worker_idle_event.set()
 
         def maybe_play(*, force: bool = False) -> None:
             nonlocal pending_frames, last_buffered_at, pending_generation
             if not pending_frames:
+                mark_idle_if_drained()
                 return
             duration = self._buffered_duration(pending_frames)
             waited = time.time() - last_buffered_at if last_buffered_at else 0.0
@@ -346,6 +378,7 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
             pending_frames = []
             last_buffered_at = 0.0
             self._upload_and_play(frames, generation)
+            mark_idle_if_drained()
 
         while not self._stop_event.is_set():
             try:
@@ -364,6 +397,7 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                 pending_generation = generation
             if frames:
                 pending_frames.extend(frames)
+                self._worker_idle_event.clear()
                 last_buffered_at = time.time()
 
             while not self._work_queue.empty():
@@ -377,6 +411,7 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                         pending_generation = more_generation
                     if more_frames:
                         pending_frames.extend(more_frames)
+                        self._worker_idle_event.clear()
                         last_buffered_at = time.time()
                     force = force or more_force
                 except queue.Empty:
@@ -387,6 +422,7 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
 
         maybe_play(force=True)
         self._play_done_event.set()
+        self._worker_idle_event.set()
 
     def _upload_and_play(self, frames: list[np.ndarray], generation: int) -> None:
         upload_id: str | None = None

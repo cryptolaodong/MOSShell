@@ -32,6 +32,7 @@ TTS_STREAM_RE = re.compile(r"Starting playing TTS stream")
 PLAY_RE = re.compile(r"\[ReachyMiniUploadAudioPlayer\] uploaded .* playing upload_id=")
 PLAY_DONE_RE = re.compile(r"\[ReachyMiniUploadAudioPlayer\] play done")
 BASE_TTS_CLEAR_RE = re.compile(r"\[BaseTTSSpeech\] clear")
+PLAYER_CLEAR_RE = re.compile(r"\[ReachyMiniUploadAudioPlayer\] cleared")
 BODY_COMMAND_RE = re.compile(r"send command task apps\.bodies_reachymini:(\w+)")
 SPEECH_SYNC_RE = re.compile(r"\[ReachyMiniSpeechSync\] command=(\w+) speech_started")
 SPEECH_TIMEOUT_RE = re.compile(r"\[ReachyMiniSpeechSync\] command=(\w+) speech_start_timeout")
@@ -97,6 +98,8 @@ def has_clear_during_playback(text: str) -> bool:
         done_pos = done.start() if done else len(text)
         for clear in BASE_TTS_CLEAR_RE.finditer(text, play.end(), done_pos):
             return True
+        for clear in PLAYER_CLEAR_RE.finditer(text, play.end(), done_pos):
+            return True
     return False
 
 
@@ -126,7 +129,7 @@ def evaluate(idx: int, message: str, text: str) -> WindowResult:
         failures.append("expected at least 1 uploaded audio playback")
 
     if has_clear_during_playback(text):
-        failures.append("BaseTTSSpeech clear occurred during upload playback")
+        failures.append("TTS/player clear occurred during upload playback")
 
     if timeout_commands:
         failures.append(f"body action timed out waiting for speech: {timeout_commands}")
