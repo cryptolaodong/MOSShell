@@ -38,6 +38,9 @@ from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
     mark_thinking as robot_mark_thinking,
     remaining_seconds as robot_speaking_remaining_seconds,
 )
+from ghoshell_moss_contrib.moss_in_reachy_mini.audio.sound_cues import (
+    build_reachy_sound_cue_player,
+)
 
 load_dotenv()
 
@@ -422,6 +425,30 @@ async def main(matrix: Matrix) -> None:
     logging.basicConfig(level=logging.WARNING)
 
     display = VoiceStatusDisplay()
+    sound_cues = build_reachy_sound_cue_player(logger=logger)
+    sound_cue_on_listening = _truthy_env("MOSS_REACHY_SOUND_CUE_ON_LISTENING", False)
+    sound_cue_on_thinking = _truthy_env("MOSS_REACHY_SOUND_CUE_ON_THINKING", True)
+    sound_cue_on_error = _truthy_env("MOSS_REACHY_SOUND_CUE_ON_ERROR", True)
+
+    def _play_sound_cue(kind: str, *, reason: str) -> None:
+        try:
+            result = sound_cues.play(kind)
+            _latency_log(
+                "voice_sound_cue",
+                kind=result.kind,
+                scheduled=result.scheduled,
+                reason=result.reason,
+                trigger=reason,
+                duration=round(result.duration_seconds, 3),
+            )
+        except Exception as error:
+            _latency_log(
+                "voice_sound_cue_error",
+                kind=kind,
+                trigger=reason,
+                error=str(error)[:200],
+            )
+
     display.show_header()
     console.print("[green]Initializing voice input pipeline...[/green]")
 
@@ -757,6 +784,8 @@ async def main(matrix: Matrix) -> None:
                         active_left_seconds=gate_decision.active_left_seconds,
                     )
                     robot_mark_thinking()
+                    if sound_cue_on_thinking:
+                        _play_sound_cue("thinking", reason="voice_final_before_send")
                     matrix.session.add_input_signal(
                         text,
                         description=f"voice: {text[:50]}",
@@ -819,10 +848,14 @@ async def main(matrix: Matrix) -> None:
         async def on_state_change(self, state: str):
             if "listening" in state.lower():
                 display.show_state("recording")
+                if sound_cue_on_listening:
+                    _play_sound_cue("listening", reason="state_listening")
             # 不处理 waiting → idle，让 on_recognition(is_last=True) 统一收尾
 
         async def on_error(self, error: str):
             _latency_log("voice_error", error=str(error)[:200])
+            if sound_cue_on_error:
+                _play_sound_cue("error", reason="voice_error")
             display.console.print(f"  [red]❌ {error}[/red]")
 
         async def on_waken(self):

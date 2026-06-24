@@ -91,11 +91,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://192.168.31.222:8000")
     parser.add_argument("--file", type=Path)
+    parser.add_argument(
+        "--cue-kind",
+        choices=["listening", "thinking", "done", "error", "recovery"],
+        help="Play one generated MOSS sound cue instead of the default tone.",
+    )
     parser.add_argument("--timeout", type=float, default=8.0)
     args = parser.parse_args()
 
     base_url = args.base_url.rstrip("/")
-    if args.file:
+    if args.cue_kind:
+        try:
+            from ghoshell_moss_contrib.moss_in_reachy_mini.audio.sound_cues import make_cue_wav
+        except ModuleNotFoundError:
+            sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+            from ghoshell_moss_contrib.moss_in_reachy_mini.audio.sound_cues import make_cue_wav
+        wav_bytes, _duration = make_cue_wav(args.cue_kind)
+        filename = f"moss_cue_self_check_{args.cue_kind}_{int(time.time())}.wav"
+    elif args.file:
         wav_bytes = _read_wav(args.file)
         filename = args.file.name
     else:
