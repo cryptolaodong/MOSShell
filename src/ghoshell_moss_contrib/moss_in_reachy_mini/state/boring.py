@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import os
 import time
 
 from ghoshell_common.contracts import LoggerItf
@@ -11,6 +12,13 @@ from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speech_sync import (
     wait_for_speech_start,
 )
 from ghoshell_moss_contrib.moss_in_reachy_mini.state.abcd import BaseReachyState
+
+
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
 
 
 class BoringState(BaseReachyState):
@@ -33,10 +41,15 @@ class BoringState(BaseReachyState):
     async def on_idle(self):
         self.logger.info("BoringState.on_idle Enter")
         try:
+            auto_sleep_seconds = _env_float("MOSS_REACHY_BORING_AUTO_SLEEP_SECONDS", 0.0)
+            if auto_sleep_seconds <= 0:
+                self.logger.info("BoringState auto sleep disabled; keeping motors enabled")
+                await asyncio.Future()
+                return
             start = time.time()
-            while time.time() - start < 30:
+            while time.time() - start < auto_sleep_seconds:
                 await asyncio.sleep(0.1)
-            self.logger.info("BoringState idle 30s, switching to asleep")
+            self.logger.info("BoringState idle %.1fs, switching to asleep", auto_sleep_seconds)
             runtime = ChannelCtx.runtime()
             if runtime is not None:
                 await runtime.execute_command("switch_state", kwargs={"name": "asleep"})

@@ -16,6 +16,7 @@ load_dotenv()
 
 import os
 import asyncio
+import time
 
 from ghoshell_moss.core.blueprint.matrix import Matrix
 from ghoshell_moss.contracts.resource import ResourceRegistry
@@ -79,14 +80,21 @@ def _env_enabled(name: str, default: str = "1") -> bool:
     return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off"}
 
 
-def _ensure_motors_enabled(logger, mini) -> None:
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _ensure_motors_enabled(logger, mini, *, reason: str) -> None:
     if not _env_enabled("MOSS_REACHY_AUTO_ENABLE_MOTORS", "1"):
         return
     try:
         mini.enable_motors()
-        logger.info("[ReachyMini Body App] Motors enabled on startup")
+        logger.info("[ReachyMini Body App] Motors enabled reason=%s", reason)
     except Exception as e:
-        logger.warning("[ReachyMini Body App] Enable motors on startup failed: %s", e)
+        logger.warning("[ReachyMini Body App] Enable motors failed reason=%s: %s", reason, e)
 
 
 async def _connection_watchdog(matrix: Matrix, mini, robot_host: str, media_backend: str) -> None:
@@ -98,6 +106,9 @@ async def _connection_watchdog(matrix: Matrix, mini, robot_host: str, media_back
     """
     logger = matrix.logger
     check_interval = 5.0
+    motor_watchdog_interval = _env_float("MOSS_REACHY_MOTOR_WATCHDOG_SECONDS", 15.0, minimum=1.0)
+    keep_motors_enabled = _env_enabled("MOSS_REACHY_KEEP_MOTORS_ENABLED", "1")
+    last_motor_watchdog_at = 0.0
     reconnect_attempts = 0
     max_reconnect = 10
 
@@ -110,6 +121,9 @@ async def _connection_watchdog(matrix: Matrix, mini, robot_host: str, media_back
                 raise ConnectionError("WebSocket client reports not alive")
             # Lightweight health check: get_status uses the WebSocket
             client.get_status()
+            if keep_motors_enabled and time.monotonic() - last_motor_watchdog_at >= motor_watchdog_interval:
+                _ensure_motors_enabled(logger, mini, reason="watchdog")
+                last_motor_watchdog_at = time.monotonic()
             if reconnect_attempts > 0:
                 logger.info("[ReachyMini Watchdog] Connection recovered after %d reconnect attempts", reconnect_attempts)
                 reconnect_attempts = 0
@@ -139,7 +153,7 @@ async def _connection_watchdog(matrix: Matrix, mini, robot_host: str, media_back
                 logger.info("[ReachyMini Watchdog] Reconnected successfully")
                 # Re-enable motors after reconnect
                 try:
-                    mini.enable_motors()
+                    _ensure_motors_enabled(logger, mini, reason="reconnect")
                     mini.wake_up()
                 except Exception as motor_err:
                     logger.warning("[ReachyMini Watchdog] Re-enable motors failed: %s", motor_err)
@@ -187,7 +201,7 @@ async def provide_channel(matrix: Matrix) -> None:
 
     # Restore original release_media
     ReachyMini.release_media = _orig_release
-    _ensure_motors_enabled(logger, mini)
+    _ensure_motors_enabled(logger, mini, reason="startup")
 
     # Build channel
     reachy = MossInReachyMini(

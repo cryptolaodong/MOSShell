@@ -18,6 +18,13 @@ from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speech_sync import (
 from ghoshell_moss_contrib.moss_in_reachy_mini.state.abcd import BaseReachyState
 
 
+def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        return max(minimum, float(os.environ.get(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
 class WakenState(BaseReachyState):
     NAME = "waken"
     DESCRIPTION = "唤醒状态：电机使能，头部追踪活跃，所有交互命令可用。"
@@ -88,6 +95,9 @@ class WakenState(BaseReachyState):
     async def on_idle(self):
         self.logger.info("WakenState.on_idle Enter")
         idle_start = time.time()
+        auto_boring_seconds = _env_float("MOSS_REACHY_WAKEN_TO_BORING_SECONDS", 0.0)
+        if auto_boring_seconds <= 0:
+            self.logger.info("WakenState auto boring disabled; staying waken while idle")
         head_task = None
         try:
             head_task = asyncio.create_task(self._head.on_idle())
@@ -109,8 +119,8 @@ class WakenState(BaseReachyState):
                     await asyncio.sleep(0.2)
                     head_task = asyncio.create_task(self._head.on_idle())
                     continue
-                if time.time() - idle_start > 300:
-                    self.logger.info("WakenState idle 300s, switching to boring")
+                if auto_boring_seconds > 0 and time.time() - idle_start > auto_boring_seconds:
+                    self.logger.info("WakenState idle %.1fs, switching to boring", auto_boring_seconds)
                     head_task.cancel()
                     try:
                         await head_task

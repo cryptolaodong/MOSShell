@@ -50,6 +50,10 @@ def _env_float(name: str, default: float, *, minimum: float = 0.0) -> float:
         return default
 
 
+def _env_enabled(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off"}
+
+
 def _connect_without_releasing_media(**kwargs) -> ReachyMini:
     original_release_media = ReachyMini.release_media
 
@@ -426,6 +430,7 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                         time.sleep(min(0.05, self._next_play_monotonic - time.monotonic()))
                     if generation != self._generation:
                         return
+                    self._ensure_motors_ready(reason="before_play")
                     self._log_output_health(reason="before_play")
                     if self._transport in {"http", "auto"}:
                         try:
@@ -615,6 +620,32 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
             "uploaded": uploaded,
             "played": played,
         }
+
+    def _ensure_motors_ready(self, *, reason: str) -> None:
+        if not _env_enabled("MOSS_REACHY_AUTO_ENABLE_MOTORS", "1"):
+            return
+        try:
+            motors = self._http_json("/api/motors/status", timeout=1.0)
+            if str(motors.get("mode", "")).lower() == "enabled":
+                return
+            changed = self._http_json(
+                "/api/motors/set_mode/enabled",
+                method="POST",
+                data={},
+                timeout=2.0,
+            )
+            time.sleep(0.1)
+            after = self._http_json("/api/motors/status", timeout=1.0)
+            self.logger.warning(
+                "%s auto_enabled_motors reason=%s before=%s changed=%s after=%s",
+                self._log_prefix,
+                reason,
+                motors,
+                changed,
+                after,
+            )
+        except Exception as e:
+            self.logger.warning("%s auto_enable_motors failed reason=%s: %s", self._log_prefix, reason, e)
 
     def _log_output_health(self, *, reason: str) -> None:
         if self._health_log_interval <= 0:
