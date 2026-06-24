@@ -75,6 +75,20 @@ async def _connect_robot(logger, robot_host: str, media_backend: str, max_attemp
     raise RuntimeError(f"Failed to connect to robot at {robot_host} after {max_attempts} attempts")
 
 
+def _env_enabled(name: str, default: str = "1") -> bool:
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _ensure_motors_enabled(logger, mini) -> None:
+    if not _env_enabled("MOSS_REACHY_AUTO_ENABLE_MOTORS", "1"):
+        return
+    try:
+        mini.enable_motors()
+        logger.info("[ReachyMini Body App] Motors enabled on startup")
+    except Exception as e:
+        logger.warning("[ReachyMini Body App] Enable motors on startup failed: %s", e)
+
+
 async def _connection_watchdog(matrix: Matrix, mini, robot_host: str, media_backend: str) -> None:
     """Monitor robot connection health and log warnings on disconnect.
 
@@ -173,6 +187,7 @@ async def provide_channel(matrix: Matrix) -> None:
 
     # Restore original release_media
     ReachyMini.release_media = _orig_release
+    _ensure_motors_enabled(logger, mini)
 
     # Build channel
     reachy = MossInReachyMini(

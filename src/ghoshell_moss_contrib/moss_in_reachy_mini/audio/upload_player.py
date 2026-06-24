@@ -12,6 +12,7 @@ This works on Mac (no GStreamer needed) and on any remote connection.
 import asyncio
 import base64
 import io
+import json
 import logging
 import math
 import os
@@ -20,6 +21,7 @@ import threading
 import time
 import wave
 from typing import Optional
+from urllib.request import Request, urlopen
 from uuid import uuid4
 
 import numpy as np
@@ -112,6 +114,17 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
             if initial_max_buffer_wait is None
             else max(0.0, initial_max_buffer_wait)
         )
+        self._transport = os.environ.get("MOSS_REACHY_UPLOAD_TRANSPORT", "http").strip().lower()
+        if self._transport not in {"http", "websocket", "auto"}:
+            self._transport = "http"
+        self._gain = _env_float("MOSS_REACHY_UPLOAD_GAIN", 1.0, minimum=0.1)
+        self._http_timeout = _env_float("MOSS_REACHY_UPLOAD_HTTP_TIMEOUT", 5.0, minimum=0.2)
+        self._health_log_interval = _env_float(
+            "MOSS_REACHY_UPLOAD_HEALTH_LOG_INTERVAL",
+            30.0,
+            minimum=0.0,
+        )
+        self._last_health_log_at = 0.0
         self._log_prefix = "[ReachyMiniUploadAudioPlayer]"
 
         self._audio_buffer: list[np.ndarray] = []
@@ -161,6 +174,11 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
             except Exception:
                 pass
             self._current_upload_id = None
+        if self._transport in {"http", "auto"}:
+            try:
+                self._http_json("/api/media/stop_sound", method="POST", data={})
+            except Exception:
+                pass
         self._estimated_end_time = time.time()
         self._next_play_monotonic = time.monotonic()
         self._played_segment_count = 0
@@ -381,6 +399,8 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                 self._play_done_event.set()
                 return
 
+            all_audio = self._apply_gain(all_audio)
+
             # Encode as WAV
             wav_bytes = self._encode_wav(all_audio)
             b64_data = base64.b64encode(wav_bytes).decode('ascii')
@@ -392,27 +412,46 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                 return
 
             duration = len(all_audio) / self.sample_rate
+            transport_used = "unknown"
+            play_result: dict[str, object] = {}
             for attempt in range(2):
                 if generation != self._generation:
                     return
                 upload_id = str(uuid4())
                 self._current_upload_id = upload_id
                 try:
-                    self._send_upload_commands(
-                        upload_id=upload_id,
-                        total_chunks=total_chunks,
-                        b64_data=b64_data,
-                        generation=generation,
-                    )
                     while time.monotonic() < self._next_play_monotonic:
                         if self._stop_event.is_set() or generation != self._generation:
                             return
                         time.sleep(min(0.05, self._next_play_monotonic - time.monotonic()))
                     if generation != self._generation:
                         return
-                    self._mini.client.send_command(PlayUploadedAudioCmd(
+                    self._log_output_health(reason="before_play")
+                    if self._transport in {"http", "auto"}:
+                        try:
+                            play_result = self._http_upload_and_play(
+                                upload_id=upload_id,
+                                wav_bytes=wav_bytes,
+                            )
+                            transport_used = "http"
+                            break
+                        except Exception as e:
+                            self.logger.warning(
+                                "%s HTTP upload/play failed: %s; trying websocket transport",
+                                self._log_prefix,
+                                e,
+                            )
+                            if self._transport == "http" and attempt >= 1:
+                                raise
+                    self._send_upload_commands(
                         upload_id=upload_id,
-                    ))
+                        total_chunks=total_chunks,
+                        b64_data=b64_data,
+                        generation=generation,
+                    )
+                    self._mini.client.send_command(PlayUploadedAudioCmd(upload_id=upload_id))
+                    transport_used = "websocket"
+                    play_result = {"status": "sent"}
                     break
                 except ConnectionError:
                     if attempt >= 1:
@@ -433,15 +472,18 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                 else 0.0
             )
             self.logger.info(
-                "%s uploaded %d bytes (%.1fs audio), playing upload_id=%s, speaking_until=%.3f upload_elapsed=%.2fs pending_to_play=%.2fs chunks=%d",
+                "%s uploaded %d bytes (%.1fs audio), playing upload_id=%s transport=%s play_result=%s speaking_until=%.3f upload_elapsed=%.2fs pending_to_play=%.2fs chunks=%d gain=%.2f",
                 self._log_prefix,
                 len(wav_bytes),
                 duration,
                 upload_id,
+                transport_used,
+                play_result,
                 speaking_until_estimate,
                 time.monotonic() - upload_started_at,
                 pending_to_play,
                 total_chunks,
+                self._gain,
             )
             mark_speaking_for(duration + self._safety_delay)
 
@@ -495,6 +537,108 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
             log_level="WARNING",
         )
         self.logger.info("%s robot client reconnected", self._log_prefix)
+
+    def _apply_gain(self, audio_data: np.ndarray) -> np.ndarray:
+        if self._gain == 1.0 or len(audio_data) == 0:
+            return audio_data
+        boosted = np.clip(audio_data.astype(np.float32) * self._gain, -32768, 32767)
+        return boosted.astype(np.int16)
+
+    def _robot_base_url(self) -> str:
+        host = str(getattr(self._mini, "host", os.environ.get("REACHY_ROBOT_HOST", "reachy-mini.local")))
+        if host.startswith("http://") or host.startswith("https://"):
+            return host.rstrip("/")
+        port = int(getattr(self._mini, "port", os.environ.get("REACHY_ROBOT_PORT", "8000")))
+        return f"http://{host}:{port}"
+
+    def _http_json(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        data: dict[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> dict[str, object]:
+        body = None
+        headers = {}
+        if data is not None:
+            body = json.dumps(data).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        req = Request(
+            f"{self._robot_base_url()}{path}",
+            data=body,
+            method=method,
+            headers=headers,
+        )
+        with urlopen(req, timeout=timeout or self._http_timeout) as response:
+            raw = response.read().decode("utf-8")
+        if not raw:
+            return {}
+        return json.loads(raw)
+
+    def _multipart_file_body(self, *, filename: str, data: bytes) -> tuple[bytes, str]:
+        boundary = f"moss-{uuid4().hex}"
+        parts = [
+            f"--{boundary}\r\n".encode("utf-8"),
+            (
+                'Content-Disposition: form-data; name="file"; '
+                f'filename="{filename}"\r\n'
+            ).encode("utf-8"),
+            b"Content-Type: audio/wav\r\n\r\n",
+            data,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode("utf-8"),
+        ]
+        return b"".join(parts), boundary
+
+    def _http_upload_and_play(self, *, upload_id: str, wav_bytes: bytes) -> dict[str, object]:
+        filename = f"moss_{upload_id}.wav"
+        body, boundary = self._multipart_file_body(filename=filename, data=wav_bytes)
+        req = Request(
+            f"{self._robot_base_url()}/api/media/sounds/upload",
+            data=body,
+            method="POST",
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        )
+        with urlopen(req, timeout=max(self._http_timeout, 8.0)) as response:
+            uploaded = json.loads(response.read().decode("utf-8"))
+        robot_file = uploaded.get("path") or uploaded.get("file") or filename
+        played = self._http_json(
+            "/api/media/play_sound",
+            method="POST",
+            data={"file": str(robot_file)},
+            timeout=max(self._http_timeout, 8.0),
+        )
+        return {
+            "status": played.get("status", "unknown"),
+            "file": str(robot_file),
+            "uploaded": uploaded,
+            "played": played,
+        }
+
+    def _log_output_health(self, *, reason: str) -> None:
+        if self._health_log_interval <= 0:
+            return
+        now = time.monotonic()
+        if now - self._last_health_log_at < self._health_log_interval:
+            return
+        self._last_health_log_at = now
+        try:
+            daemon = self._http_json("/api/daemon/status", timeout=1.0)
+            media = self._http_json("/api/media/status", timeout=1.0)
+            volume = self._http_json("/api/volume/current", timeout=1.0)
+            motors = self._http_json("/api/motors/status", timeout=1.0)
+            self.logger.info(
+                "%s output_health reason=%s daemon_state=%s media=%s volume=%s motors=%s",
+                self._log_prefix,
+                reason,
+                daemon.get("state"),
+                media,
+                volume,
+                motors,
+            )
+        except Exception as e:
+            self.logger.warning("%s output_health failed: %s", self._log_prefix, e)
 
     def _encode_wav(self, audio_data: np.ndarray) -> bytes:
         buf = io.BytesIO()

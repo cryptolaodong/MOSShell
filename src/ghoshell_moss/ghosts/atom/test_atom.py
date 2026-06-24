@@ -364,6 +364,17 @@ class TestAdapter:
         assert _brief_voice_request_kind("小白你觉得北京这个城市怎么样请用一句话回答") == "brief_llm"
         assert _brief_voice_request_kind("小白请简短回答你喜欢什么颜色") == "brief_llm"
 
+    def test_simple_fast_reply_handles_open_question_asr_distortions(self):
+        from ._runtime import _simple_fast_reply_with_kind
+
+        kind, reply = _simple_fast_reply_with_kind("小白起点的回答你最喜欢做什么")
+        assert kind == "brief_preference"
+        assert reply == "我最喜欢听你说话，然后把回答和动作配合好。"
+
+        kind, reply = _simple_fast_reply_with_kind("小白你这位金这个城市怎么样緊用一句话回答")
+        assert kind == "brief_opinion"
+        assert reply.startswith("我觉得北京这个城市")
+
     def test_brief_llm_defaults_on_for_reachy_voice(self, monkeypatch):
         from ._runtime import _fast_brief_default_enabled
 

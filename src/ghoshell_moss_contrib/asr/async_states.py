@@ -235,6 +235,13 @@ def _canonicalize_safe_local_fallback_text(text: str) -> str:
         "小白腰": "小白你好",
         "小白鱼": "小白你好",
         "小白衣": "小白你好",
+        "我把你好": "小白你好",
+        "我拜你好": "小白你好",
+        "小你好": "小白你好",
+        "小泥好": "小白你好",
+        "来你好": "小白你好",
+        "想玩你好": "小白你好",
+        "做完你好": "小白你好",
     }
     if normalized in exact_homophones:
         return exact_homophones[normalized]

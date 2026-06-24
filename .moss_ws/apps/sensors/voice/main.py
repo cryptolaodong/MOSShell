@@ -96,8 +96,8 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS": "0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR": "1.0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_MAX_SECONDS": "0",
-        "MOSS_ASR_ENERGY_SPEECH_RMS": "1800",
-        "MOSS_ASR_INPUT_GATE_RMS": "1800",
+        "MOSS_ASR_ENERGY_SPEECH_RMS": "1100",
+        "MOSS_ASR_INPUT_GATE_RMS": "1100",
         "MOSS_ASR_INPUT_GATE_OPEN_FRAMES": "1",
         "MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS": "5.5",
         "MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS": "1.25",
@@ -406,7 +406,7 @@ async def main(matrix: Matrix) -> None:
         mic_backend_selected = "local_sounddevice"
     elif mic_backend in {"reachy", "robot"}:
         console.print("[cyan]Voice mic backend: Reachy robot microphone[/cyan]")
-        os.environ.setdefault("MOSS_REACHY_MIC_FALLBACK", "0")
+        os.environ.setdefault("MOSS_REACHY_MIC_FALLBACK", "sounddevice")
         sd_input = ReachyMicAudioInput(rate=16000, channels=1)
         mic_backend_selected = "reachy_robot"
     else:

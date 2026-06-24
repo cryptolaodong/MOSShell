@@ -53,6 +53,7 @@ class ReachyMicAudioInput:
         self._zero_read_count = 0
         self._zero_reopen_reads = int(os.environ.get("MOSS_REACHY_MIC_ZERO_REOPEN_READS", "20"))
         self._zero_reopen_seconds = float(os.environ.get("MOSS_REACHY_MIC_ZERO_REOPEN_SECONDS", "2.0"))
+        self._zero_fallback_reads = int(os.environ.get("MOSS_REACHY_MIC_ZERO_FALLBACK_READS", "30"))
         self._recovering_media = False
 
     async def start(self) -> None:
@@ -138,6 +139,33 @@ class ReachyMicAudioInput:
                 flush=True,
             )
             self._logger.warning("ReachyMicAudioInput: unavailable, returning silence")
+
+    def _fallback_enabled(self) -> bool:
+        return _is_truthy(os.environ.get("MOSS_REACHY_MIC_FALLBACK", "sounddevice"))
+
+    async def _switch_to_sounddevice_fallback(self, *, reason: str) -> bool:
+        if self._fallback is not None:
+            return True
+        if not self._fallback_enabled():
+            return False
+        try:
+            fallback = SoundDeviceAudioInput(
+                rate=self.rate,
+                channels=self.channels,
+                dtype=self.dtype,
+                logger=self._logger,
+                raise_on_unavailable=True,
+            )
+            await fallback.start()
+            self._fallback = fallback
+            self._zero_read_count = 0
+            print(f"[ReachyMicAudioInput] switched to local sounddevice fallback reason={reason}", flush=True)
+            self._logger.warning("ReachyMicAudioInput: switched to local sounddevice fallback reason=%s", reason)
+            return True
+        except Exception as fallback_error:
+            print(f"[ReachyMicAudioInput] local fallback unavailable after {reason}: {fallback_error}", flush=True)
+            self._logger.error("ReachyMicAudioInput: local fallback unavailable after %s: %s", reason, fallback_error)
+            return False
 
     def _fetch_daemon_status(self, *, timeout: float = 0.7) -> dict:
         with request.urlopen(f"{self._daemon_url}/api/daemon/status", timeout=timeout) as resp:
@@ -290,6 +318,9 @@ class ReachyMicAudioInput:
                     and time.monotonic() - self._last_nonzero_read >= self._zero_reopen_seconds
                 ):
                     await self._recover_media_if_needed(force=True, reason="zero_audio")
+                if self._zero_fallback_reads > 0 and self._zero_read_count >= self._zero_fallback_reads:
+                    if await self._switch_to_sounddevice_fallback(reason="persistent_zero_audio"):
+                        return await self._fallback.read(rate=rate, duration=duration)
             if self._read_count <= 3 or self._read_count % 100 == 0:
                 print(f"[ReachyMicAudioInput] read #{self._read_count}: {len(result)} samples, rms={rms:.1f}", flush=True)
             return result

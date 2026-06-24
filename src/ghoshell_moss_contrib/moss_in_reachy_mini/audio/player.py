@@ -146,7 +146,8 @@ class ReachyMiniStreamPlayerProvider(Provider[StreamAudioPlayer]):
                 connection_mode='network',
             )
             from ghoshell_moss_contrib.moss_in_reachy_mini.audio.upload_player import ReachyMiniUploadAudioPlayer
-            logger.info('[ReachyMiniAudioPlayer] Using upload-based audio player (WebSocket)')
+            transport = os.environ.get("MOSS_REACHY_UPLOAD_TRANSPORT", "http")
+            logger.info('[ReachyMiniAudioPlayer] Using upload-based audio player transport=%s', transport)
             return ReachyMiniUploadAudioPlayer(mini, sample_rate=24000, channels=1, logger=logger)
         except Exception as e:
             logger.warning('[ReachyMiniAudioPlayer] Upload player failed: %s', e)
