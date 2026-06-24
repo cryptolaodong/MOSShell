@@ -65,10 +65,19 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS": "0.85",
         "MOSS_ASR_LOCAL_FALLBACK_TIMEOUT_SECONDS": "3.0",
         "MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS": "4.2",
+        "MOSS_ASR_LOCAL_FALLBACK_COMMIT_UNSAFE_MIN_RMS": "2000",
+        "MOSS_ASR_LOCAL_FALLBACK_MAX_ATTEMPTS": "2",
+        "MOSS_ASR_LOCAL_FALLBACK_RETRY_DELAY_SECONDS": "0.45",
+        "MOSS_ASR_LOCAL_FALLBACK_UNSAFE_DROP_MIN_SECONDS": "1.8",
+        "MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT": "1",
+        "MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT_MAX_CHARS": "5",
         "MOSS_ASR_LONG_STABLE_TEXT_COMMIT_SECONDS": "1.8",
         "MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS": "1.2",
         "MOSS_ASR_LONG_EMPTY_TEXT_COMMIT_SECONDS": "1.8",
         "MOSS_ASR_LONG_EMPTY_TEXT_MIN_QUIET_SECONDS": "1.2",
+        "MOSS_ASR_INCOMPLETE_PREFIX_ENABLED": "1",
+        "MOSS_ASR_INCOMPLETE_PREFIX_MIN_QUIET_SECONDS": "1.8",
+        "MOSS_ASR_INCOMPLETE_PREFIX_MIN_CHARS": "8",
         "MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS": "0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR": "1.0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_MAX_SECONDS": "0",
@@ -83,6 +92,7 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_VOICE_SAVE_EMPTY_ASR_AUDIO": "0",
         "MOSS_VOICE_SAVE_REJECTED_ASR_AUDIO": "1",
         "MOSS_VOICE_REJECTED_ASR_AUDIO_MIN_RMS": "1800",
+        "MOSS_VOICE_WAKE_RECOVERY_MIN_RMS": "1800",
     }
     applied: dict[str, str] = {}
     for name, value in defaults.items():
@@ -522,13 +532,23 @@ async def main(matrix: Matrix) -> None:
                 active_left_before = turn_gate.active_left(now)
                 active_before = active_left_before > 0
                 recovery_left = max(0.0, float(_wake_recovery.get("until", 0.0)) - now)
-                recovery_allowed = (
-                    is_local_fallback
-                    and not addressed_before
-                    and not active_before
-                    and recovery_left > 0
+                armed_recovery_rms = float(_wake_recovery.get("rms", 0.0) or 0.0)
+                effective_recovery_rms = max(audio_max_rms, armed_recovery_rms)
+                recovery_text = _is_wake_recovery_followup_text(text)
+                armed_recovery_allowed = (
+                    recovery_left > 0
+                    and armed_recovery_rms >= wake_recovery_min_rms
+                    and recovery_text
+                )
+                same_batch_recovery_allowed = (
+                    (result.commit_reason or "") == "local_fallback_no_safe_text"
                     and audio_max_rms >= wake_recovery_min_rms
-                    and _is_wake_recovery_followup_text(text)
+                    and recovery_text
+                )
+                recovery_allowed = (
+                    not addressed_before
+                    and not active_before
+                    and (armed_recovery_allowed or same_batch_recovery_allowed)
                 )
                 weak_local_fallback = False
                 if is_local_fallback and (addressed_before or active_before):
@@ -564,9 +584,11 @@ async def main(matrix: Matrix) -> None:
                         text_len=len(text),
                         text_preview=text[:40],
                         audio_max_rms=round(audio_max_rms, 1),
+                        effective_rms=round(effective_recovery_rms, 1),
                         recovery_left=round(recovery_left, 3),
                         armed_reason=str(_wake_recovery.get("reason") or "")[:60],
-                        armed_rms=round(float(_wake_recovery.get("rms", 0.0) or 0.0), 1),
+                        armed_rms=round(armed_recovery_rms, 1),
+                        same_batch=bool(same_batch_recovery_allowed),
                     )
                 else:
                     gate_decision = turn_gate.decide_final(text, now)
@@ -787,13 +809,25 @@ async def main(matrix: Matrix) -> None:
     poll_interval = float(os.environ.get("MOSS_VOICE_LOOP_POLL_SECONDS", "0.15"))
     restart_delay = float(os.environ.get("MOSS_VOICE_RESTART_DELAY_SECONDS", "0.08"))
     speaking_tail = float(os.environ.get("MOSS_VOICE_ROBOT_SPEAKING_TAIL_SECONDS", "0.8"))
+    was_robot_speaking = False
     try:
         while True:
             await asyncio.sleep(poll_interval)
             try:
                 await _poll_control_file()
                 if robot_is_speaking(tail=speaking_tail):
+                    was_robot_speaking = True
                     await threaded.clear_buffer()
+                    continue
+                if was_robot_speaking:
+                    was_robot_speaking = False
+                    await threaded.clear_buffer()
+                    display.show_state("idle")
+                    _latency_log(
+                        "voice_clear_after_robot_speaking",
+                        tail=round(speaking_tail, 3),
+                    )
+                    await asyncio.sleep(restart_delay)
                     continue
                 current_state = await threaded.current_state()
                 state_name = current_state.name().value

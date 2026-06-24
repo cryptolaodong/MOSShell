@@ -6,6 +6,7 @@ import pytest
 
 import ghoshell_moss_contrib.asr.async_states as async_states
 from ghoshell_moss_contrib.asr.async_states import AsyncPdtListeningState
+from ghoshell_moss_contrib.asr.concepts.listener import Recognition
 
 
 class _Clock:
@@ -107,6 +108,27 @@ def test_empty_text_commit_policy_keeps_short_fast_and_long_patient(monkeypatch)
     assert state._empty_text_commit_policy("小白我现在要说一个比较长的问题。") == (1.8, "long", 1.2)
 
 
+def test_incomplete_prefix_guard_waits_for_opening_fragment(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_INCOMPLETE_PREFIX_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_INCOMPLETE_PREFIX_MIN_QUIET_SECONDS", "2.4")
+    monkeypatch.setenv("MOSS_ASR_INCOMPLETE_PREFIX_MIN_CHARS", "8")
+    monkeypatch.setenv("MOSS_VOICE_ADDRESS_WORDS", "小白")
+
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=_Callback(),
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(_Clock()),
+    )
+
+    assert state._incomplete_prefix_quiet_remaining("小白你好", 0.8) == 0.0
+    assert state._incomplete_prefix_quiet_remaining("小白你现在能做什么", 0.8) == 0.0
+    assert state._incomplete_prefix_quiet_remaining("小白，我想测试一下", 1.17) == pytest.approx(1.23)
+    assert state._incomplete_prefix_quiet_remaining("小白，我想测试一下", 2.4) == 0.0
+    assert state._incomplete_prefix_quiet_remaining("小白，我想测试一下。", 0.8) == 0.0
+
+
 @pytest.mark.asyncio
 async def test_energy_vad_defers_empty_commit_for_local_fallback(monkeypatch) -> None:
     monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
@@ -152,6 +174,178 @@ async def test_energy_vad_defers_empty_commit_for_local_fallback(monkeypatch) ->
     assert callback.recognitions[-1].text == "小白你好"
     assert callback.recognitions[-1].commit_reason == "local_whisper_quiet"
     assert callback.saved_batches == []
+
+
+@pytest.mark.asyncio
+async def test_unsafe_short_local_fallback_retries_before_drop(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_DROP_UNSAFE", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MAX_ATTEMPTS", "2")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_RETRY_DELAY_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_UNSAFE_DROP_MIN_SECONDS", "2")
+    monkeypatch.setenv("MOSS_ASR_INPUT_GATE_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", "10")
+
+    clock = _Clock()
+    monkeypatch.setattr(async_states.time, "time", clock.time)
+
+    callback = _Callback()
+    batch = _Batch()
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=callback,
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(clock),
+    )
+    state._current_batch = batch
+    state._batch_started_at = clock.time()
+
+    fallback_calls = []
+
+    async def _try_local_fallback(*, reason: str, max_rms: float, last_loud_age: float) -> str:
+        fallback_calls.append((reason, max_rms, last_loud_age))
+        return "" if len(fallback_calls) == 1 else "小白你好"
+
+    state._try_local_fallback = _try_local_fallback
+
+    loud = np.full(1600, 2000, dtype=np.int16)
+    quiet = np.zeros(1600, dtype=np.int16)
+
+    await state._process_audio_batch(deque([loud, quiet]))
+
+    assert len(fallback_calls) == 2
+    assert callback.recognitions[-1].text == "小白你好"
+    assert callback.recognitions[-1].commit_reason == "local_whisper_quiet"
+    assert callback.saved_batches == []
+
+
+@pytest.mark.asyncio
+async def test_unsafe_short_cloud_fragment_runs_local_rescue_before_commit(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_DROP_UNSAFE", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_INPUT_GATE_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_STABLE_TEXT_COMMIT_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_STABLE_SHORT_MIN_QUIET_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", "10")
+
+    clock = _Clock()
+    monkeypatch.setattr(async_states.time, "time", clock.time)
+
+    callback = _Callback()
+    batch = _Batch()
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=callback,
+        logger=_Logger(),
+        vad=None,
+    )
+    state._current_batch = batch
+    state._batch_started_at = clock.time()
+    state._last_non_empty_text = "你"
+    state._last_non_empty_recognition_time = clock.time() - 1
+    state._last_text_change_time = clock.time() - 1
+
+    fallback_calls = []
+
+    async def _try_local_fallback(*, reason: str, max_rms: float, last_loud_age: float) -> str:
+        fallback_calls.append((reason, max_rms, last_loud_age))
+        return "小白你好"
+
+    state._try_local_fallback = _try_local_fallback
+
+    loud = np.full(1600, 2000, dtype=np.int16)
+
+    await state._process_audio_batch(deque([loud]))
+
+    assert fallback_calls
+    assert fallback_calls[0][0] == "unsafe_short_text"
+    assert batch.commits == 0
+    assert callback.recognitions[-1].text == "小白你好"
+    assert callback.recognitions[-1].commit_reason == "unsafe_short_text"
+
+
+@pytest.mark.asyncio
+async def test_high_energy_unsafe_local_fallback_commits_for_server_final(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_DROP_UNSAFE", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MAX_ATTEMPTS", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_COMMIT_UNSAFE_MIN_RMS", "1500")
+    monkeypatch.setenv("MOSS_ASR_INPUT_GATE_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", "10")
+
+    clock = _Clock()
+    monkeypatch.setattr(async_states.time, "time", clock.time)
+
+    callback = _Callback()
+    batch = _Batch()
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=callback,
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(clock),
+    )
+    state._current_batch = batch
+    state._batch_started_at = clock.time()
+
+    fallback_calls = []
+
+    async def _try_local_fallback(*, reason: str, max_rms: float, last_loud_age: float) -> str:
+        fallback_calls.append((reason, max_rms, last_loud_age))
+        return ""
+
+    state._try_local_fallback = _try_local_fallback
+
+    loud = np.full(1600, 2000, dtype=np.int16)
+    quiet = np.zeros(1600, dtype=np.int16)
+
+    await state._process_audio_batch(deque([loud, quiet]))
+
+    assert len(fallback_calls) == 1
+    assert batch.commits == 1
+    assert state._commit_reason == "local_fallback_no_safe_text"
+    assert len(callback.saved_batches) == 1
+    assert callback.saved_batches[0][0].commit_reason == "local_fallback_no_safe_text"
+
+
+@pytest.mark.asyncio
+async def test_auto_commit_propagates_audio_max_rms_to_final_recognition() -> None:
+    callback = _Callback()
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=callback,
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(_Clock()),
+    )
+    state._commit_reason = "energy_vad"
+    state._commit_audio_max_rms = 2345.6
+
+    await state.on_recognition(Recognition(text="你好", is_last=True))
+
+    assert callback.recognitions[-1].commit_reason == "energy_vad"
+    assert callback.recognitions[-1].audio_max_rms == 2345.6
 
 
 @pytest.mark.asyncio

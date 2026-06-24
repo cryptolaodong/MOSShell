@@ -54,6 +54,55 @@ def _ends_terminal_punctuation(text: str) -> bool:
     return text.rstrip().endswith(("。", "？", "?", "！", "!", "；", ";", ".", "…"))
 
 
+def _split_address_words(value: str) -> tuple[str, ...]:
+    words: list[str] = []
+    for raw in value.replace("，", ",").split(","):
+        word = _normalize_local_asr_text(raw)
+        if word and word not in words:
+            words.append(word)
+    return tuple(words)
+
+
+def _addressed_text_body(normalized: str, address_words: tuple[str, ...]) -> str:
+    for word in address_words:
+        if word and normalized.startswith(word):
+            return normalized[len(word):]
+    return ""
+
+
+def _looks_like_complete_addressed_text(body: str) -> bool:
+    if not body:
+        return False
+    complete_suffixes = (
+        "你好",
+        "在吗",
+        "对吗",
+        "好吗",
+        "行吗",
+        "可以吗",
+        "能行吗",
+        "是谁",
+        "是什么",
+        "做什么",
+        "为什么",
+        "怎么做",
+        "怎么样",
+        "怎么办",
+        "在哪里",
+        "在哪",
+        "哪儿",
+        "哪里",
+        "哪个",
+        "多少",
+        "几点",
+        "几号",
+        "谁",
+        "吗",
+        "呢",
+    )
+    return any(body.endswith(suffix) for suffix in complete_suffixes)
+
+
 _LOCAL_WHISPER_LOCK = threading.Lock()
 _LOCAL_WHISPER_MODEL = None
 _LOCAL_WHISPER_MODEL_KEY: tuple[str, str, str] | None = None
@@ -140,6 +189,17 @@ def _looks_like_rescuable_wake_second_pass(normalized: str) -> bool:
     if not normalized.startswith(("小", "想", "叫", "老")):
         return False
     return any(token in normalized for token in ("你好", "好", "号", "號"))
+
+
+def _looks_like_rescuable_cloud_short_fragment(normalized: str) -> bool:
+    if not normalized:
+        return False
+    if len(normalized) <= 2:
+        return True
+    return (
+        _looks_like_rescuable_short_wake_fragment(normalized)
+        or _looks_like_rescuable_wake_second_pass(normalized)
+    )
 
 
 def _canonicalize_safe_local_fallback_text(text: str) -> str:
@@ -707,6 +767,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._last_non_empty_text: str = ""
         self._last_text_change_time: float = 0.0
         self._commit_reason: str = ""
+        self._commit_audio_max_rms: float = 0.0
         self._stable_text_commit_seconds = _float_env("MOSS_ASR_STABLE_TEXT_COMMIT_SECONDS", 0.45)
         self._long_stable_text_commit_seconds = _float_env("MOSS_ASR_LONG_STABLE_TEXT_COMMIT_SECONDS", 1.2)
         self._short_text_max_chars = _int_env("MOSS_ASR_SHORT_TEXT_MAX_CHARS", 8)
@@ -719,6 +780,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._audio_idle_commit_seconds = _float_env("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", 0.8)
         self._final_wait_seconds = _float_env("MOSS_ASR_FINAL_WAIT_SECONDS", 0.35)
         self._empty_final_wait_seconds = _float_env("MOSS_ASR_EMPTY_FINAL_WAIT_SECONDS", 0.35)
+        self._local_fallback_no_safe_final_wait_seconds = _float_env(
+            "MOSS_ASR_LOCAL_FALLBACK_NO_SAFE_FINAL_WAIT_SECONDS",
+            self._empty_final_wait_seconds,
+        )
         self._server_vad_ms = _int_env("MOSS_ASR_SERVER_VAD_MS", 900)
         self._stable_text_min_quiet_seconds = _float_env("MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS", 0.45)
         self._stable_punct_min_quiet_seconds = _float_env(
@@ -732,6 +797,18 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._long_empty_text_min_quiet_seconds = _float_env(
             "MOSS_ASR_LONG_EMPTY_TEXT_MIN_QUIET_SECONDS",
             max(self._stable_text_min_quiet_seconds, self._long_stable_text_commit_seconds),
+        )
+        self._incomplete_prefix_enabled = _bool_env("MOSS_ASR_INCOMPLETE_PREFIX_ENABLED", False)
+        self._incomplete_prefix_min_quiet_seconds = _float_env(
+            "MOSS_ASR_INCOMPLETE_PREFIX_MIN_QUIET_SECONDS",
+            1.8,
+        )
+        self._incomplete_prefix_min_chars = _int_env(
+            "MOSS_ASR_INCOMPLETE_PREFIX_MIN_CHARS",
+            self._short_text_max_chars,
+        )
+        self._incomplete_prefix_address_words = _split_address_words(
+            os.environ.get("MOSS_VOICE_ADDRESS_WORDS", "小白,蒋白"),
         )
         self._prespeech_batch_max_seconds = _float_env("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", 3.0)
         self._speech_no_text_max_seconds = _float_env("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", 5.5)
@@ -767,6 +844,27 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._local_fallback_max_audio_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_MAX_AUDIO_SECONDS", 6.0)
         self._local_fallback_pad_seconds = _float_env("MOSS_ASR_LOCAL_FALLBACK_PAD_SECONDS", 0.15)
         self._local_fallback_drop_unsafe = _bool_env("MOSS_ASR_LOCAL_FALLBACK_DROP_UNSAFE", False)
+        self._local_fallback_commit_unsafe_min_rms = _float_env(
+            "MOSS_ASR_LOCAL_FALLBACK_COMMIT_UNSAFE_MIN_RMS",
+            0.0,
+        )
+        self._local_fallback_max_attempts = max(1, _int_env("MOSS_ASR_LOCAL_FALLBACK_MAX_ATTEMPTS", 2))
+        self._local_fallback_retry_delay_seconds = max(
+            0.0,
+            _float_env("MOSS_ASR_LOCAL_FALLBACK_RETRY_DELAY_SECONDS", 0.45),
+        )
+        self._local_fallback_unsafe_drop_min_seconds = max(
+            0.0,
+            _float_env("MOSS_ASR_LOCAL_FALLBACK_UNSAFE_DROP_MIN_SECONDS", 1.8),
+        )
+        self._local_fallback_rescue_unsafe_short = _bool_env(
+            "MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT",
+            False,
+        )
+        self._local_fallback_rescue_unsafe_short_max_chars = max(
+            1,
+            _int_env("MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT_MAX_CHARS", 5),
+        )
         self._save_safe_local_fallback_audio = _bool_env("MOSS_ASR_SAVE_SAFE_LOCAL_FALLBACK_AUDIO", False)
         self._batch_started_at = 0.0
         self._committed_at = 0.0
@@ -786,6 +884,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._last_non_empty_text = ""
         self._last_text_change_time = 0.0
         self._commit_reason = ""
+        self._commit_audio_max_rms = 0.0
         self._batch_started_at = time.time()
         self._committed_at = 0.0
 
@@ -890,6 +989,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         # 最后一条结果附加提交原因
         if result.is_last:
             result.commit_reason = self._commit_reason or "manual"
+            if self._commit_audio_max_rms > 0 and getattr(result, "audio_max_rms", 0.0) <= 0:
+                result.audio_max_rms = round(self._commit_audio_max_rms, 1)
 
         self._logger.info(
             f"PTT on_recognition: text='{result.text}', sentence={result.sentence}, "
@@ -997,11 +1098,15 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 audio_idle=self._audio_idle_commit_seconds,
                 final_wait=self._final_wait_seconds,
                 empty_final_wait=self._empty_final_wait_seconds,
+                local_fallback_no_safe_final_wait=self._local_fallback_no_safe_final_wait_seconds,
                 server_vad_ms=self._server_vad_ms,
                 stable_quiet=self._stable_text_min_quiet_seconds,
                 stable_punct_quiet=self._stable_punct_min_quiet_seconds,
                 stable_short_quiet=self._stable_short_min_quiet_seconds,
                 long_empty_quiet=self._long_empty_text_min_quiet_seconds,
+                incomplete_prefix=self._incomplete_prefix_enabled,
+                incomplete_prefix_quiet=self._incomplete_prefix_min_quiet_seconds,
+                incomplete_prefix_min_chars=self._incomplete_prefix_min_chars,
                 prespeech_max=self._prespeech_batch_max_seconds,
                 speech_no_text_max=self._speech_no_text_max_seconds,
                 speech_no_text_quiet=self._speech_no_text_min_quiet_seconds,
@@ -1025,8 +1130,16 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 local_fallback_timeout=self._local_fallback_timeout_seconds,
                 local_fallback_trigger_max=self._local_fallback_trigger_max_seconds,
                 local_fallback_drop_unsafe=self._local_fallback_drop_unsafe,
+                local_fallback_commit_unsafe_min_rms=self._local_fallback_commit_unsafe_min_rms,
+                local_fallback_max_attempts=self._local_fallback_max_attempts,
+                local_fallback_retry_delay=self._local_fallback_retry_delay_seconds,
+                local_fallback_unsafe_drop_min=self._local_fallback_unsafe_drop_min_seconds,
                 local_fallback_rescue=bool(self._local_fallback_rescue_prompt),
                 local_fallback_rescue_model=self._local_fallback_rescue_model,
+                local_fallback_rescue_unsafe_short=self._local_fallback_rescue_unsafe_short,
+                local_fallback_rescue_unsafe_short_max_chars=(
+                    self._local_fallback_rescue_unsafe_short_max_chars
+                ),
             )
 
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
@@ -1078,6 +1191,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._committed = True
         self._commit_reason = reason
         self._committed_at = time.time()
+        try:
+            self._commit_audio_max_rms = float(log_fields.get("max_rms") or 0.0)
+        except (TypeError, ValueError):
+            self._commit_audio_max_rms = 0.0
         self._logger.warning(
             "[ReachyLatency] asr_auto_commit reason=%s elapsed=%.2fs stable_text=%r",
             reason,
@@ -1093,6 +1210,44 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         )
         if self._current_batch:
             await self._current_batch.commit()
+
+    def _incomplete_prefix_quiet_remaining(self, text: str, quiet_elapsed: float) -> float:
+        if (
+            not self._incomplete_prefix_enabled
+            or self._incomplete_prefix_min_quiet_seconds <= 0
+            or quiet_elapsed == float("inf")
+        ):
+            return 0.0
+        stripped = (text or "").strip()
+        if not stripped or _ends_terminal_punctuation(stripped):
+            return 0.0
+        normalized = _normalize_local_asr_text(stripped)
+        if len(normalized) < self._incomplete_prefix_min_chars:
+            return 0.0
+        body = _addressed_text_body(normalized, self._incomplete_prefix_address_words)
+        if not body or _looks_like_complete_addressed_text(body):
+            return 0.0
+        return max(0.0, self._incomplete_prefix_min_quiet_seconds - quiet_elapsed)
+
+    def _log_incomplete_prefix_defer(
+        self,
+        *,
+        reason: str,
+        text: str,
+        quiet_elapsed: float,
+        remaining: float,
+        max_rms: float,
+    ) -> None:
+        _latency_log(
+            "asr_incomplete_prefix_defer",
+            reason=reason,
+            text_len=len((text or "").strip()),
+            text_preview=(text or "")[:40],
+            quiet=round(quiet_elapsed, 3) if quiet_elapsed != float("inf") else None,
+            required=round(self._incomplete_prefix_min_quiet_seconds, 3),
+            remaining=round(remaining, 3),
+            max_rms=round(max_rms, 1),
+        )
 
     def _empty_text_commit_policy(self, text: str) -> tuple[float, str, float]:
         stripped = text.strip()
@@ -1134,6 +1289,46 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         )
         return True, ready, elapsed, last_loud_age
 
+    def _local_fallback_unsafe_short_text_window(
+        self,
+        text: str,
+        *,
+        has_speech: bool,
+        local_fallback_attempted: bool,
+        max_rms: float,
+        first_loud_audio_time: float,
+        last_loud_audio_time: float,
+    ) -> tuple[bool, bool, float, float]:
+        if (
+            not self._local_fallback_rescue_unsafe_short
+            or not self._local_fallback_enabled
+            or local_fallback_attempted
+            or not has_speech
+            or max_rms < self._local_fallback_min_rms
+            or self._batch_started_at <= 0
+            or last_loud_audio_time <= 0
+        ):
+            return False, False, 0.0, 0.0
+        normalized = _normalize_local_asr_text(text)
+        if (
+            not normalized
+            or len(normalized) > self._local_fallback_rescue_unsafe_short_max_chars
+            or _is_safe_local_fallback_text(text)
+            or not _looks_like_rescuable_cloud_short_fragment(normalized)
+        ):
+            return False, False, 0.0, 0.0
+        now = time.time()
+        speech_started_at = first_loud_audio_time or self._batch_started_at
+        elapsed = now - speech_started_at
+        last_loud_age = now - last_loud_audio_time
+        if self._local_fallback_trigger_max_seconds > 0 and elapsed > self._local_fallback_trigger_max_seconds:
+            return False, False, elapsed, last_loud_age
+        ready = (
+            elapsed >= self._local_fallback_min_seconds
+            and last_loud_age >= self._local_fallback_quiet_seconds
+        )
+        return True, ready, elapsed, last_loud_age
+
     async def _process_audio_batch(self, audio_queue: deque[np.ndarray]) -> None:
         """处理 PTT 音频批次"""
         global _NO_TEXT_COOLDOWN_UNTIL, _NO_TEXT_FAILURE_COUNT
@@ -1154,7 +1349,84 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         input_gate_last_loud_time = 0.0
         input_gate_loud_frames = 0
         cooldown_skip_logged = False
-        local_fallback_attempted = False
+        local_fallback_attempts = 0
+        local_fallback_next_after = 0.0
+        incomplete_prefix_defer_last_log = 0.0
+
+        async def try_unsafe_short_text_rescue(reason: str) -> bool:
+            global _NO_TEXT_FAILURE_COUNT
+            nonlocal local_fallback_attempts, local_fallback_next_after, last_audio_time
+            eligible, ready, elapsed, last_loud_age = self._local_fallback_unsafe_short_text_window(
+                self._last_non_empty_text,
+                has_speech=has_speech,
+                local_fallback_attempted=(
+                    local_fallback_attempts >= self._local_fallback_max_attempts
+                ),
+                max_rms=max_rms,
+                first_loud_audio_time=first_loud_audio_time,
+                last_loud_audio_time=last_loud_audio_time,
+            )
+            if not eligible:
+                return False
+            _latency_log(
+                "asr_unsafe_short_defer_for_local_fallback",
+                reason=reason,
+                ready=ready and time.time() >= local_fallback_next_after,
+                attempts=local_fallback_attempts,
+                text_len=len(self._last_non_empty_text.strip()),
+                text_preview=self._last_non_empty_text[:40],
+                speech_elapsed=round(elapsed, 3),
+                last_loud_age=round(last_loud_age, 3),
+                max_rms=round(max_rms, 1),
+            )
+            if not ready or time.time() < local_fallback_next_after:
+                return True
+
+            local_fallback_attempts += 1
+            fallback_text = await self._try_local_fallback(
+                reason="unsafe_short_text",
+                max_rms=max_rms,
+                last_loud_age=last_loud_age,
+            )
+            if fallback_text:
+                _NO_TEXT_FAILURE_COUNT = 0
+                await self._finish_with_local_fallback(
+                    fallback_text,
+                    reason="unsafe_short_text",
+                    max_rms=max_rms,
+                    last_loud_age=last_loud_age,
+                )
+                return True
+
+            can_retry_unsafe = (
+                self._local_fallback_drop_unsafe
+                and local_fallback_attempts < self._local_fallback_max_attempts
+                and (
+                    self._local_fallback_unsafe_drop_min_seconds <= 0
+                    or elapsed < self._local_fallback_unsafe_drop_min_seconds
+                )
+                and (
+                    self._local_fallback_trigger_max_seconds <= 0
+                    or elapsed + self._local_fallback_retry_delay_seconds
+                    <= self._local_fallback_trigger_max_seconds
+                )
+            )
+            if can_retry_unsafe:
+                local_fallback_next_after = time.time() + self._local_fallback_retry_delay_seconds
+                last_audio_time = time.time()
+                _latency_log(
+                    "asr_unsafe_short_retry",
+                    reason=reason,
+                    attempts=local_fallback_attempts,
+                    max_attempts=self._local_fallback_max_attempts,
+                    retry_delay=round(self._local_fallback_retry_delay_seconds, 3),
+                    max_rms=round(max_rms, 1),
+                    last_loud_age=round(last_loud_age, 3),
+                    speech_elapsed=round(elapsed, 3),
+                )
+                return True
+            return False
+
         while not self._closed:
             # 检查批次是否完成
             if self._current_batch and await self._current_batch.is_done():
@@ -1244,7 +1516,9 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         fallback_eligible, fallback_ready, fallback_elapsed, fallback_last_loud_age = (
                             self._local_fallback_empty_text_window(
                                 has_speech=has_speech,
-                                local_fallback_attempted=local_fallback_attempted,
+                                local_fallback_attempted=(
+                                    local_fallback_attempts >= self._local_fallback_max_attempts
+                                ),
                                 max_rms=max_rms,
                                 first_loud_audio_time=first_loud_audio_time,
                                 last_loud_audio_time=last_loud_audio_time,
@@ -1254,17 +1528,43 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                             _latency_log(
                                 "asr_energy_vad_defer_for_local_fallback",
                                 ready=fallback_ready,
+                                attempts=local_fallback_attempts,
                                 speech_elapsed=round(fallback_elapsed, 3),
                                 last_loud_age=round(fallback_last_loud_age, 3),
                                 max_rms=round(max_rms, 1),
                             )
                         else:
+                            quiet_elapsed = (
+                                time.time() - last_loud_audio_time
+                                if last_loud_audio_time > 0
+                                else float("inf")
+                            )
+                            remaining = self._incomplete_prefix_quiet_remaining(
+                                self._last_non_empty_text,
+                                quiet_elapsed,
+                            )
+                            if remaining > 0:
+                                now = time.time()
+                                if now - incomplete_prefix_defer_last_log >= 0.5:
+                                    incomplete_prefix_defer_last_log = now
+                                    self._log_incomplete_prefix_defer(
+                                        reason="energy_vad",
+                                        text=self._last_non_empty_text,
+                                        quiet_elapsed=quiet_elapsed,
+                                        remaining=remaining,
+                                        max_rms=max_rms,
+                                    )
+                                continue
+                            if await try_unsafe_short_text_rescue("energy_vad"):
+                                if self._closed:
+                                    break
+                                continue
                             await self._do_auto_commit(
                                 "energy_vad",
                                 max_rms=round(max_rms, 1),
                                 has_speech=has_speech,
-                                last_loud_age=round(time.time() - last_loud_audio_time, 3)
-                                if last_loud_audio_time > 0
+                                last_loud_age=round(quiet_elapsed, 3)
+                                if quiet_elapsed != float("inf")
                                 else None,
                             )
 
@@ -1294,7 +1594,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             if (
                 not self._committed
                 and self._local_fallback_enabled
-                and not local_fallback_attempted
+                and local_fallback_attempts < self._local_fallback_max_attempts
+                and time.time() >= local_fallback_next_after
                 and has_speech
                 and not self._last_non_empty_text.strip()
                 and max_rms >= self._local_fallback_min_rms
@@ -1312,7 +1613,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         or elapsed <= self._local_fallback_trigger_max_seconds
                     )
                 ):
-                    local_fallback_attempted = True
+                    local_fallback_attempts += 1
                     fallback_text = await self._try_local_fallback(
                         reason="local_whisper_quiet",
                         max_rms=max_rms,
@@ -1328,24 +1629,79 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         )
                         break
                     if self._local_fallback_drop_unsafe:
-                        self._start_no_text_cooldown(
-                            reason="local_fallback_no_safe_text",
-                            max_rms=max_rms,
+                        can_retry_unsafe = (
+                            local_fallback_attempts < self._local_fallback_max_attempts
+                            and (
+                                self._local_fallback_unsafe_drop_min_seconds <= 0
+                                or elapsed < self._local_fallback_unsafe_drop_min_seconds
+                            )
+                            and (
+                                self._local_fallback_trigger_max_seconds <= 0
+                                or elapsed + self._local_fallback_retry_delay_seconds
+                                <= self._local_fallback_trigger_max_seconds
+                            )
                         )
-                        _latency_log(
-                            "asr_local_fallback_noise_drop",
-                            max_rms=round(max_rms, 1),
-                            last_loud_age=round(last_loud_age, 3),
-                            speech_elapsed=round(elapsed, 3),
-                            elapsed=round(time.time() - self._batch_started_at, 3)
-                            if self._batch_started_at
-                            else 0.0,
-                        )
-                        await self._save_debug_batch(
-                            reason="local_fallback_no_safe_text",
-                            max_rms=max_rms,
-                        )
-                        break
+                        if can_retry_unsafe:
+                            local_fallback_next_after = time.time() + self._local_fallback_retry_delay_seconds
+                            last_audio_time = time.time()
+                            _latency_log(
+                                "asr_local_fallback_unsafe_defer",
+                                attempts=local_fallback_attempts,
+                                max_attempts=self._local_fallback_max_attempts,
+                                retry_delay=round(self._local_fallback_retry_delay_seconds, 3),
+                                max_rms=round(max_rms, 1),
+                                last_loud_age=round(last_loud_age, 3),
+                                speech_elapsed=round(elapsed, 3),
+                                elapsed=round(time.time() - self._batch_started_at, 3)
+                                if self._batch_started_at
+                                else 0.0,
+                            )
+                        else:
+                            should_commit_for_server_final = (
+                                self._local_fallback_commit_unsafe_min_rms > 0
+                                and max_rms >= self._local_fallback_commit_unsafe_min_rms
+                            )
+                            if should_commit_for_server_final:
+                                _latency_log(
+                                    "asr_local_fallback_commit_on_no_safe_text",
+                                    attempts=local_fallback_attempts,
+                                    max_attempts=self._local_fallback_max_attempts,
+                                    commit_min_rms=round(self._local_fallback_commit_unsafe_min_rms, 1),
+                                    max_rms=round(max_rms, 1),
+                                    last_loud_age=round(last_loud_age, 3),
+                                    speech_elapsed=round(elapsed, 3),
+                                    elapsed=round(time.time() - self._batch_started_at, 3)
+                                    if self._batch_started_at
+                                    else 0.0,
+                                )
+                                await self._do_auto_commit(
+                                    "local_fallback_no_safe_text",
+                                    attempts=local_fallback_attempts,
+                                    max_attempts=self._local_fallback_max_attempts,
+                                    max_rms=round(max_rms, 1),
+                                    last_loud_age=round(last_loud_age, 3),
+                                )
+                            else:
+                                self._start_no_text_cooldown(
+                                    reason="local_fallback_no_safe_text",
+                                    max_rms=max_rms,
+                                )
+                                _latency_log(
+                                    "asr_local_fallback_noise_drop",
+                                    attempts=local_fallback_attempts,
+                                    max_attempts=self._local_fallback_max_attempts,
+                                    max_rms=round(max_rms, 1),
+                                    last_loud_age=round(last_loud_age, 3),
+                                    speech_elapsed=round(elapsed, 3),
+                                    elapsed=round(time.time() - self._batch_started_at, 3)
+                                    if self._batch_started_at
+                                    else 0.0,
+                                )
+                                await self._save_debug_batch(
+                                    reason="local_fallback_no_safe_text",
+                                    max_rms=max_rms,
+                                )
+                                break
                     # Local fallback may block for hundreds of ms. Do not let that
                     # pause look like input silence while captured audio is queued.
                     last_audio_time = time.time()
@@ -1419,14 +1775,41 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             if not self._committed and has_speech and not audio_queue:
                 audio_idle = time.time() - last_audio_time
                 if audio_idle >= self._audio_idle_commit_seconds:
+                    quiet_elapsed = (
+                        time.time() - last_loud_audio_time
+                        if last_loud_audio_time > 0
+                        else float("inf")
+                    )
+                    remaining = self._incomplete_prefix_quiet_remaining(
+                        self._last_non_empty_text,
+                        quiet_elapsed,
+                    )
+                    if remaining > 0:
+                        now = time.time()
+                        if now - incomplete_prefix_defer_last_log >= 0.5:
+                            incomplete_prefix_defer_last_log = now
+                            self._log_incomplete_prefix_defer(
+                                reason="audio_idle",
+                                text=self._last_non_empty_text,
+                                quiet_elapsed=quiet_elapsed,
+                                remaining=remaining,
+                                max_rms=max_rms,
+                            )
+                        await asyncio.sleep(0.01)
+                        continue
+                    if await try_unsafe_short_text_rescue("audio_idle"):
+                        if self._closed:
+                            break
+                        await asyncio.sleep(0.01)
+                        continue
                     self._logger.info(
                         f"Audio queue idle for {audio_idle:.1f}s after speech, auto-committing"
                     )
                     await self._do_auto_commit(
                         "audio_idle",
                         max_rms=round(max_rms, 1),
-                        last_loud_age=round(time.time() - last_loud_audio_time, 3)
-                        if last_loud_audio_time > 0
+                        last_loud_age=round(quiet_elapsed, 3)
+                        if quiet_elapsed != float("inf")
                         else None,
                     )
 
@@ -1456,6 +1839,25 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     if quiet_elapsed < min_quiet_seconds:
                         await asyncio.sleep(0.01)
                         continue
+                    remaining = self._incomplete_prefix_quiet_remaining(text, quiet_elapsed)
+                    if remaining > 0:
+                        now = time.time()
+                        if now - incomplete_prefix_defer_last_log >= 0.5:
+                            incomplete_prefix_defer_last_log = now
+                            self._log_incomplete_prefix_defer(
+                                reason=f"stable_text_{threshold_kind}",
+                                text=text,
+                                quiet_elapsed=quiet_elapsed,
+                                remaining=remaining,
+                                max_rms=max_rms,
+                            )
+                        await asyncio.sleep(0.01)
+                        continue
+                    if await try_unsafe_short_text_rescue(f"stable_text_{threshold_kind}"):
+                        if self._closed:
+                            break
+                        await asyncio.sleep(0.01)
+                        continue
                     self._logger.info(
                         "ASR stable text timeout (%.1fs, threshold=%.1fs kind=%s, quiet=%.1fs min_quiet=%.1fs, text=%r), auto-committing",
                         stable_elapsed,
@@ -1467,6 +1869,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     )
                     await self._do_auto_commit(
                         f"stable_text_{threshold_kind}",
+                        max_rms=round(max_rms, 1),
                         quiet=round(quiet_elapsed, 3)
                         if quiet_elapsed != float("inf")
                         else None,
@@ -1488,6 +1891,28 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     if quiet_elapsed < min_quiet_seconds:
                         await asyncio.sleep(0.01)
                         continue
+                    remaining = self._incomplete_prefix_quiet_remaining(
+                        self._last_non_empty_text,
+                        quiet_elapsed,
+                    )
+                    if remaining > 0:
+                        now = time.time()
+                        if now - incomplete_prefix_defer_last_log >= 0.5:
+                            incomplete_prefix_defer_last_log = now
+                            self._log_incomplete_prefix_defer(
+                                reason="empty_text_timeout",
+                                text=self._last_non_empty_text,
+                                quiet_elapsed=quiet_elapsed,
+                                remaining=remaining,
+                                max_rms=max_rms,
+                            )
+                        await asyncio.sleep(0.01)
+                        continue
+                    if await try_unsafe_short_text_rescue("empty_text_timeout"):
+                        if self._closed:
+                            break
+                        await asyncio.sleep(0.01)
+                        continue
                     self._logger.info(
                         "ASR empty text timeout (%.1fs, threshold=%.1fs kind=%s, quiet=%.1fs min_quiet=%.1fs), auto-committing",
                         elapsed,
@@ -1498,6 +1923,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     )
                     await self._do_auto_commit(
                         "empty_text_timeout",
+                        max_rms=round(max_rms, 1),
                         empty_kind=empty_kind,
                         threshold=round(empty_threshold, 3),
                         quiet=round(quiet_elapsed, 3)
@@ -1510,11 +1936,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             if self._committed:
                 # 等待批次完成或超时
                 wait_started = time.time()
-                final_wait_seconds = (
-                    self._empty_final_wait_seconds
-                    if not self._last_non_empty_text.strip()
-                    else self._final_wait_seconds
-                )
+                if self._commit_reason == "local_fallback_no_safe_text":
+                    final_wait_seconds = self._local_fallback_no_safe_final_wait_seconds
+                elif not self._last_non_empty_text.strip():
+                    final_wait_seconds = self._empty_final_wait_seconds
+                else:
+                    final_wait_seconds = self._final_wait_seconds
                 try:
                     await asyncio.wait_for(
                         self._current_batch.wait_until_done(),
