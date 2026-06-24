@@ -1313,6 +1313,22 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             "MOSS_ASR_FINAL_OPEN_FALLBACK_MAX_AUDIO_SECONDS",
             max(self._local_fallback_max_audio_seconds, 8.0),
         )
+        self._final_open_fallback_early_seconds = _float_env(
+            "MOSS_ASR_FINAL_OPEN_FALLBACK_EARLY_SECONDS",
+            0.0,
+        )
+        self._final_open_fallback_early_min_quiet_seconds = _float_env(
+            "MOSS_ASR_FINAL_OPEN_FALLBACK_EARLY_MIN_QUIET_SECONDS",
+            self._speech_no_text_min_quiet_seconds,
+        )
+        self._final_open_fallback_early_min_active_seconds = _float_env(
+            "MOSS_ASR_FINAL_OPEN_FALLBACK_EARLY_MIN_ACTIVE_SECONDS",
+            1.0,
+        )
+        self._final_open_fallback_early_allow_empty = _bool_env(
+            "MOSS_ASR_FINAL_OPEN_FALLBACK_EARLY_ALLOW_EMPTY",
+            False,
+        )
         self._open_fallback_fragment_ttl_seconds = _float_env(
             "MOSS_ASR_OPEN_FALLBACK_FRAGMENT_TTL_SECONDS",
             12.0,
@@ -1516,7 +1532,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 "local_fallback=%s local_model=%s local_min_rms=%.1f local_quiet=%.2fs drop_unsafe=%s "
                 "empty_wake=%s empty_wake_model=%s empty_wake_min_rms=%.1f "
                 "empty_wake_active=%.2fs..%.2fs "
-                "final_open=%s final_open_model=%s final_open_min_rms=%.1f",
+                "final_open=%s final_open_model=%s final_open_min_rms=%.1f "
+                "final_open_early=%.2fs quiet=%.2fs active=%.2fs allow_empty=%s",
                 getattr(self._vad, "_silence_hold_time", None),
                 getattr(self._vad, "_speech_threshold", None),
                 getattr(self._vad, "_silence_threshold", None),
@@ -1562,6 +1579,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._final_open_fallback_enabled,
                 self._final_open_fallback_model,
                 self._final_open_fallback_min_rms,
+                self._final_open_fallback_early_seconds,
+                self._final_open_fallback_early_min_quiet_seconds,
+                self._final_open_fallback_early_min_active_seconds,
+                self._final_open_fallback_early_allow_empty,
             )
             _latency_log(
                 "asr_tuning",
@@ -1646,6 +1667,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 final_open_fallback_model=self._final_open_fallback_model,
                 final_open_fallback_timeout=self._final_open_fallback_timeout_seconds,
                 final_open_fallback_max_audio=self._final_open_fallback_max_audio_seconds,
+                final_open_fallback_early=self._final_open_fallback_early_seconds,
+                final_open_fallback_early_quiet=self._final_open_fallback_early_min_quiet_seconds,
+                final_open_fallback_early_active=self._final_open_fallback_early_min_active_seconds,
+                final_open_fallback_early_allow_empty=self._final_open_fallback_early_allow_empty,
             )
 
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
@@ -1961,6 +1986,36 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         # actively arriving; wait for a quiet window so we don't cut the user off.
         return last_loud_age >= self._speech_no_text_min_quiet_seconds
 
+    def _early_final_open_fallback_ready(
+        self,
+        *,
+        has_speech: bool,
+        max_rms: float,
+        first_loud_audio_time: float,
+        last_loud_audio_time: float,
+    ) -> tuple[bool, float, float, float]:
+        if (
+            not has_speech
+            or self._final_open_fallback_early_seconds <= 0
+            or first_loud_audio_time <= 0
+            or last_loud_audio_time <= 0
+        ):
+            return False, 0.0, 0.0, 0.0
+        if not self._last_non_empty_text.strip() and not self._final_open_fallback_early_allow_empty:
+            return False, 0.0, 0.0, 0.0
+        if not self._should_try_final_open_fallback(self._last_non_empty_text, max_rms=max_rms):
+            return False, 0.0, 0.0, 0.0
+        now = time.time()
+        speech_elapsed = now - first_loud_audio_time
+        last_loud_age = now - last_loud_audio_time
+        active_span = max(0.0, last_loud_audio_time - first_loud_audio_time)
+        ready = (
+            speech_elapsed >= self._final_open_fallback_early_seconds
+            and last_loud_age >= self._final_open_fallback_early_min_quiet_seconds
+            and active_span >= self._final_open_fallback_early_min_active_seconds
+        )
+        return ready, speech_elapsed, last_loud_age, active_span
+
     async def _process_audio_batch(self, audio_queue: deque[np.ndarray]) -> None:
         """处理 PTT 音频批次"""
         global _NO_TEXT_COOLDOWN_UNTIL, _NO_TEXT_FAILURE_COUNT
@@ -1985,6 +2040,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         local_fallback_next_after = 0.0
         empty_wake_fallback_attempted = False
         final_open_fallback_attempted = False
+        early_final_open_fallback_attempted = False
         incomplete_prefix_defer_last_log = 0.0
         self._last_batch_error = ""
 
@@ -2133,7 +2189,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             )
             return False
 
-        async def try_final_open_text_rescue(reason: str, *, last_loud_age: float) -> bool:
+        async def try_final_open_text_rescue(
+            reason: str,
+            *,
+            last_loud_age: float,
+            consume_attempt: bool = True,
+        ) -> bool:
             global _NO_TEXT_FAILURE_COUNT
             nonlocal final_open_fallback_attempted
             if final_open_fallback_attempted:
@@ -2145,7 +2206,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 max_rms=max_rms,
             ):
                 return False
-            final_open_fallback_attempted = True
+            if consume_attempt:
+                final_open_fallback_attempted = True
             _latency_log(
                 "asr_final_open_fallback_try",
                 reason=reason,
@@ -2588,6 +2650,31 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     last_audio_time = time.time()
                     if audio_queue:
                         continue
+
+            if not self._committed and not early_final_open_fallback_attempted:
+                ready, speech_elapsed, last_loud_age, active_span = self._early_final_open_fallback_ready(
+                    has_speech=has_speech,
+                    max_rms=max_rms,
+                    first_loud_audio_time=first_loud_audio_time,
+                    last_loud_audio_time=last_loud_audio_time,
+                )
+                if ready:
+                    early_final_open_fallback_attempted = True
+                    _latency_log(
+                        "asr_final_open_fallback_early",
+                        speech_elapsed=round(speech_elapsed, 3),
+                        last_loud_age=round(last_loud_age, 3),
+                        active_span=round(active_span, 3),
+                        max_rms=round(max_rms, 1),
+                        text_len=len(self._last_non_empty_text.strip()),
+                        text_preview=self._last_non_empty_text[:40],
+                    )
+                    if await try_final_open_text_rescue(
+                        "early_final_open",
+                        last_loud_age=last_loud_age,
+                        consume_attempt=False,
+                    ):
+                        break
 
             # 如果本地 VAD 明确听到过声音，但云端 ASR 长时间没有任何文字，
             # 这通常是被背景噪声或批次边界卡住的坏流。尽快旋转，避免短唤醒词被旧流吞掉。

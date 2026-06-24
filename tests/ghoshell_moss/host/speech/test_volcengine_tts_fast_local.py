@@ -63,3 +63,13 @@ async def test_fast_local_phrase_batch_ignores_open_text(monkeypatch) -> None:
 
     assert not await tts._try_fast_local_phrase_batch(batch)
     assert not batch.is_closed()
+
+
+def test_fast_local_phrase_defaults_include_reachy_deterministic_replies() -> None:
+    tts = VolcengineTTS(
+        conf=VolcengineTTSConf(),
+        logger=logging.getLogger("test_fast_local_phrase_defaults_include_reachy_deterministic_replies"),
+    )
+
+    assert "我能听你说话、回答问题，并同步表情和头部动作" in tts._fast_local_phrases
+    assert "我会等你说完，再简短回答" in tts._fast_local_phrases

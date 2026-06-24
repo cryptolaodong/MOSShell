@@ -177,6 +177,58 @@ def test_speech_no_text_rotate_waits_for_quiet_window(monkeypatch) -> None:
     assert state._speech_no_text_ready_to_rotate(3.2, 0.65)
 
 
+def test_early_final_open_fallback_requires_long_active_speech(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_MIN_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_EARLY_SECONDS", "2.1")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_EARLY_MIN_QUIET_SECONDS", "0.75")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_EARLY_MIN_ACTIVE_SECONDS", "0.9")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_EARLY_ALLOW_EMPTY", "0")
+
+    clock = _Clock()
+    clock.now = 1003.0
+    monkeypatch.setattr(async_states.time, "time", clock.time)
+
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=_Callback(),
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(clock),
+    )
+    state._last_non_empty_text = "请用一句话"
+
+    ready, speech_elapsed, last_loud_age, active_span = state._early_final_open_fallback_ready(
+        has_speech=True,
+        max_rms=2000,
+        first_loud_audio_time=1000.0,
+        last_loud_audio_time=1002.0,
+    )
+    assert ready
+    assert speech_elapsed == pytest.approx(3.0)
+    assert last_loud_age == pytest.approx(1.0)
+    assert active_span == pytest.approx(2.0)
+
+    short_ready, _, _, short_active_span = state._early_final_open_fallback_ready(
+        has_speech=True,
+        max_rms=2000,
+        first_loud_audio_time=1002.0,
+        last_loud_audio_time=1002.2,
+    )
+    assert not short_ready
+    assert short_active_span == pytest.approx(0.2)
+
+    state._last_non_empty_text = ""
+    empty_ready, _, _, _ = state._early_final_open_fallback_ready(
+        has_speech=True,
+        max_rms=2000,
+        first_loud_audio_time=1000.0,
+        last_loud_audio_time=1002.0,
+    )
+    assert not empty_ready
+
+
 def test_final_open_fallback_skips_latency_probe_fragments(monkeypatch) -> None:
     monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
     monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_ENABLED", "1")

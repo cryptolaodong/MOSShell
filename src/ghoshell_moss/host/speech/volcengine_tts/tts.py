@@ -590,7 +590,11 @@ class VolcengineTTS(TTS):
         self._default_tts_info = self.get_info()
         self._fast_local_phrases = _env_phrase_set(
             "MOSS_TTS_FAST_LOCAL_PHRASES",
-            "在呢。|收到。|我听明白了。",
+            (
+                "在呢。|收到。|我听明白了。|"
+                "我能听你说话、回答问题，并同步表情和头部动作。|"
+                "我会等你说完，再简短回答。"
+            ),
         )
 
     def get_info(self) -> TTSInfo:
