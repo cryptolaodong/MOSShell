@@ -324,6 +324,18 @@ class TestAdapter:
         assert _simple_fast_reply_for_text("小白你现在能做什么请用一句话说") == (
             "我能听你说话、回答问题，并同步表情和头部动作。"
         )
+        assert _simple_fast_reply_for_text("小白用一句话回答你现在能帮我做什么") == (
+            "我能听你说话、回答问题，并同步表情和头部动作。"
+        )
+        assert _simple_fast_reply_for_text("小白用一句话回答你现在能帮") == (
+            "我能听你说话、回答问题，并同步表情和头部动作。"
+        )
+        assert _simple_fast_reply_for_text("小白用一句话回答你现在的话我付什么") == (
+            "我能听你说话、回答问题，并同步表情和头部动作。"
+        )
+        assert _simple_fast_reply_for_text("小白用一句话回答你现在的方法做什么") == (
+            "我能听你说话、回答问题，并同步表情和头部动作。"
+        )
         assert _simple_fast_reply_for_text("你能做什么，详细展开讲讲") is None
 
     def test_simple_fast_reply_for_latency_probe(self):
@@ -340,6 +352,11 @@ class TestAdapter:
         )
         assert clipped_kind == "latency_probe"
         assert clipped_reply == "我会等你说完，再简短回答。"
+        clipped_mis_asr_kind, clipped_mis_asr_reply = _simple_fast_reply_with_kind(
+            "请你一定躲，这句话全部说完以后。"
+        )
+        assert clipped_mis_asr_kind == "latency_probe"
+        assert clipped_mis_asr_reply == "我会等你说完，再简短回答。"
 
     def test_brief_voice_request_routes_to_brief_llm(self):
         from ._runtime import _brief_voice_request_kind
@@ -370,3 +387,91 @@ class TestAdapter:
 
         assert kind == "brief_opinion"
         assert reply == "我觉得北京这个城市很有生命力，快节奏里也有自己的温度。"
+
+    def test_simple_fast_reply_for_common_open_brief_questions(self):
+        from ._runtime import _simple_fast_reply_with_kind
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白请用一句话解单回答地今天最喜欢什么颜色为什么"
+        )
+        assert kind == "brief_color"
+        assert reply == "我喜欢蓝色，因为它像天空一样安静又可靠。"
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白姐用一句话解答回答你一天自己的神点色为什么"
+        )
+        assert kind == "brief_color"
+        assert reply == "我喜欢蓝色，因为它像天空一样安静又可靠。"
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白琴用一句话简单回答你今天自行二十年次为什么"
+        )
+        assert kind == "brief_color"
+        assert reply == "我喜欢蓝色，因为它像天空一样安静又可靠。"
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白请丁秘去换简单回答你今天最喜欢手机的字会什么"
+        )
+        assert kind == "brief_color"
+        assert reply == "我喜欢蓝色，因为它像天空一样安静又可靠。"
+
+        kind, reply = _simple_fast_reply_with_kind("小白请简短回答你最喜欢做什么")
+        assert kind == "brief_preference"
+        assert reply == "我最喜欢听你说话，然后把回答和动作配合好。"
+
+        kind, reply = _simple_fast_reply_with_kind("小白请请回答你最喜欢做什么")
+        assert kind == "brief_preference"
+        assert reply == "我最喜欢听你说话，然后把回答和动作配合好。"
+
+        kind, reply = _simple_fast_reply_with_kind("小白请简直回答你最喜欢做什么")
+        assert kind == "brief_preference"
+        assert reply == "我最喜欢听你说话，然后把回答和动作配合好。"
+
+        kind, reply = _simple_fast_reply_with_kind("小白情简直回家你最喜欢做什么")
+        assert kind == "brief_preference"
+        assert reply == "我最喜欢听你说话，然后把回答和动作配合好。"
+
+        kind, reply = _simple_fast_reply_with_kind("小白晴监督我让你最喜欢做什么")
+        assert kind == "brief_preference"
+        assert reply == "我最喜欢听你说话，然后把回答和动作配合好。"
+
+        kind, reply = _simple_fast_reply_with_kind("小白请简单回答机器人为什么需要耳朵")
+        assert kind == "brief_robot_ears"
+        assert reply == "机器人需要耳朵，是为了听见你、理解你，再及时回应你。"
+
+        kind, reply = _simple_fast_reply_with_kind("小白请简单回答机器人为時需要耳朵")
+        assert kind == "brief_robot_ears"
+        assert reply == "机器人需要耳朵，是为了听见你、理解你，再及时回应你。"
+
+        kind, reply = _simple_fast_reply_with_kind("小白一起写单回家机器人为什么去哪儿做")
+        assert kind == "brief_robot_ears"
+        assert reply == "机器人需要耳朵，是为了听见你、理解你，再及时回应你。"
+
+    def test_simple_fast_reply_for_noisy_brief_opinion(self):
+        from ._runtime import _simple_fast_reply_with_kind
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白李觉得北京这个城市怎么样请一尼俊望回答"
+        )
+
+        assert kind == "brief_opinion"
+        assert reply == "我觉得北京这个城市很有生命力，快节奏里也有自己的温度。"
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白领觉得北京这个城市怎么样请用一句话回答"
+        )
+
+        assert kind == "brief_opinion"
+        assert reply == "我觉得北京这个城市很有生命力，快节奏里也有自己的温度。"
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白你觉得北京这个城市怎么样请你进换回答"
+        )
+
+        assert kind == "brief_opinion"
+        assert reply == "我觉得北京这个城市很有生命力，快节奏里也有自己的温度。"
+
+    def test_common_open_brief_fast_reply_keeps_actions_on_full_llm(self):
+        from ._runtime import _simple_fast_reply_for_text
+
+        assert _simple_fast_reply_for_text("小白请点头并用一句话回答你喜欢什么颜色") is None

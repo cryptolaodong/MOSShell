@@ -125,8 +125,10 @@ def _normalize_local_asr_text(text: str) -> str:
         "請": "请",
         "簡": "简",
         "單": "单",
+        "時": "时",
         "話": "话",
         "為": "为",
+        "後": "后",
         "歡": "欢",
         "顏": "颜",
         "顔": "颜",
@@ -137,6 +139,7 @@ def _normalize_local_asr_text(text: str) -> str:
         "聽": "听",
         "機": "机",
         "臺": "台",
+        "來": "来",
         "妳": "你",
         "線": "线",
         "夠": "够",
@@ -186,6 +189,8 @@ def _looks_like_rescuable_short_wake_fragment(normalized: str) -> bool:
         return False
     if any(blocked in normalized for blocked in ("酒", "明", "铃", "鈴")):
         return False
+    if normalized.startswith("好"):
+        return False
     if normalized in {"小一号", "小孩好"}:
         return True
     if "白" not in normalized:
@@ -225,6 +230,11 @@ def _canonicalize_safe_local_fallback_text(text: str) -> str:
         "小白糖": "小白你好",
         "小白一号": "小白你好",
         "老白你好": "小白你好",
+        "小白以后": "小白你好",
+        "走来你好": "小白你好",
+        "小白腰": "小白你好",
+        "小白鱼": "小白你好",
+        "小白衣": "小白你好",
     }
     if normalized in exact_homophones:
         return exact_homophones[normalized]
@@ -243,9 +253,11 @@ def _canonicalize_safe_local_fallback_text(text: str) -> str:
                 return "小白你现在能做什么"
     if normalized.startswith("小白") and len(normalized) <= 16:
         rest = normalized[2:]
+        if any(token in rest for token in ("喜欢", "回答", "颜色", "简短", "简单", "一句话")):
+            return cleaned
         if any(
             token in rest
-            for token in ("能做", "会做", "做什么", "能够什么", "能干什么", "干什么")
+            for token in ("能做", "会做", "能够什么", "能干什么", "干什么")
         ):
             return "小白你现在能做什么"
     if normalized == "你现在能做什么":
@@ -314,6 +326,27 @@ _OPEN_REQUEST_KEYWORDS = (
     "等我",
     "说完",
 )
+_OPEN_REQUEST_SEMANTIC_KEYWORDS = (
+    "为什么",
+    "怎么样",
+    "如何",
+    "喜欢",
+    "颜色",
+    "做什么",
+    "能帮",
+    "帮我",
+    "介绍",
+    "耳朵",
+    "北京",
+)
+_OPEN_REQUEST_PREFIX_ONLY = (
+    "请用一句话",
+    "用一句话回答",
+    "请简单回答",
+    "请简短回答",
+    "简单回答",
+    "简短回答",
+)
 
 _OPEN_REQUEST_WAKE_PREFIXES = (
     "小白",
@@ -355,6 +388,7 @@ def _canonicalize_open_local_fallback_text(text: str) -> str:
         "简短回答",
         "你觉得",
         "最喜欢",
+        "今天最喜欢",
         "机器人为什么",
     )
     if normalized.startswith(clipped_prefixes):
@@ -368,6 +402,8 @@ def _is_safe_open_local_fallback_text(text: str) -> bool:
         return False
     if not any(token in normalized for token in _OPEN_REQUEST_KEYWORDS):
         return False
+    if not any(token in normalized for token in _OPEN_REQUEST_SEMANTIC_KEYWORDS):
+        return False
     if normalized.startswith("小白") and len(normalized) > 4:
         return True
     clipped_prefixes = (
@@ -378,6 +414,7 @@ def _is_safe_open_local_fallback_text(text: str) -> bool:
         "简短回答",
         "你觉得",
         "最喜欢",
+        "今天最喜欢",
         "机器人为什么",
     )
     return normalized.startswith(clipped_prefixes)
@@ -390,6 +427,15 @@ def _looks_like_open_request_fragment(text: str) -> bool:
     if len(normalized) > 30:
         return False
     return any(token in normalized for token in _OPEN_REQUEST_KEYWORDS)
+
+
+def _looks_like_latency_probe_fragment(text: str) -> bool:
+    normalized = _normalize_local_asr_text(text)
+    if not normalized:
+        return False
+    if any(token in normalized for token in ("等我这句话", "等我说完", "全部说完", "听我说完")):
+        return True
+    return "测试" in normalized and "延迟" in normalized
 
 
 def _local_whisper_transcribe(
@@ -912,6 +958,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             "MOSS_ASR_INCOMPLETE_PREFIX_MIN_QUIET_SECONDS",
             1.8,
         )
+        self._incomplete_open_prefix_min_quiet_seconds = _float_env(
+            "MOSS_ASR_INCOMPLETE_OPEN_PREFIX_MIN_QUIET_SECONDS",
+            max(self._incomplete_prefix_min_quiet_seconds, 2.4),
+        )
         self._incomplete_prefix_min_chars = _int_env(
             "MOSS_ASR_INCOMPLETE_PREFIX_MIN_CHARS",
             self._short_text_max_chars,
@@ -1248,6 +1298,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 long_empty_quiet=self._long_empty_text_min_quiet_seconds,
                 incomplete_prefix=self._incomplete_prefix_enabled,
                 incomplete_prefix_quiet=self._incomplete_prefix_min_quiet_seconds,
+                incomplete_open_prefix_quiet=self._incomplete_open_prefix_min_quiet_seconds,
                 incomplete_prefix_min_chars=self._incomplete_prefix_min_chars,
                 prespeech_max=self._prespeech_batch_max_seconds,
                 speech_no_text_max=self._speech_no_text_max_seconds,
@@ -1366,12 +1417,23 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         ):
             return 0.0
         stripped = (text or "").strip()
-        if not stripped or _ends_terminal_punctuation(stripped):
+        if not stripped:
             return 0.0
         normalized = _normalize_local_asr_text(stripped)
-        if len(normalized) < self._incomplete_prefix_min_chars:
+        if normalized in self._incomplete_prefix_address_words:
+            return max(0.0, self._incomplete_prefix_min_quiet_seconds - quiet_elapsed)
+        if _ends_terminal_punctuation(stripped):
             return 0.0
         body = _addressed_text_body(normalized, self._incomplete_prefix_address_words)
+        if body in ("请用", "用一句话", "请简单", "请简短", "简单回答", "简短回答"):
+            return max(0.0, self._incomplete_open_prefix_min_quiet_seconds - quiet_elapsed)
+        if len(normalized) < self._incomplete_prefix_min_chars:
+            return 0.0
+        if (
+            body.startswith(_OPEN_REQUEST_PREFIX_ONLY)
+            and not any(token in body for token in _OPEN_REQUEST_SEMANTIC_KEYWORDS)
+        ):
+            return max(0.0, self._incomplete_open_prefix_min_quiet_seconds - quiet_elapsed)
         if not body or _looks_like_complete_addressed_text(body):
             return 0.0
         return max(0.0, self._incomplete_prefix_min_quiet_seconds - quiet_elapsed)
@@ -1485,6 +1547,10 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             return False
         if text and _is_safe_local_fallback_text(text):
             return False
+        if text and _is_safe_open_local_fallback_text(text):
+            return False
+        if _looks_like_latency_probe_fragment(text):
+            return False
         return _looks_like_open_request_fragment(text)
 
     def _speech_no_text_ready_to_rotate(self, elapsed: float, last_loud_age: float) -> bool:
@@ -1595,6 +1661,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             return False
 
         async def try_final_open_text_rescue(reason: str, *, last_loud_age: float) -> bool:
+            global _NO_TEXT_FAILURE_COUNT
             nonlocal final_open_fallback_attempted
             if final_open_fallback_attempted:
                 return False
@@ -1626,24 +1693,32 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 timeout_seconds=self._final_open_fallback_timeout_seconds,
                 max_audio_seconds=self._final_open_fallback_max_audio_seconds,
             )
-            if not fallback_text or not _is_safe_open_local_fallback_text(fallback_text):
-                _latency_log(
-                    "asr_final_open_fallback_miss",
-                    reason=reason,
-                    text_len=len(fallback_text or ""),
-                    text_preview=(fallback_text or "")[:40],
-                    max_rms=round(max_rms, 1),
+            if fallback_text and _is_safe_open_local_fallback_text(fallback_text):
+                _NO_TEXT_FAILURE_COUNT = 0
+                await self._finish_with_local_fallback(
+                    _canonicalize_open_local_fallback_text(fallback_text),
+                    reason="final_open_fallback",
+                    max_rms=max_rms,
+                    last_loud_age=last_loud_age,
                 )
-                return False
-            global _NO_TEXT_FAILURE_COUNT
-            _NO_TEXT_FAILURE_COUNT = 0
-            await self._finish_with_local_fallback(
-                fallback_text,
-                reason="final_open_fallback",
-                max_rms=max_rms,
-                last_loud_age=last_loud_age,
+                return True
+            if fallback_text and _is_safe_local_fallback_text(fallback_text):
+                _NO_TEXT_FAILURE_COUNT = 0
+                await self._finish_with_local_fallback(
+                    _canonicalize_safe_local_fallback_text(fallback_text),
+                    reason="final_open_fallback",
+                    max_rms=max_rms,
+                    last_loud_age=last_loud_age,
+                )
+                return True
+            _latency_log(
+                "asr_final_open_fallback_miss",
+                reason=reason,
+                text_len=len(fallback_text or ""),
+                text_preview=(fallback_text or "")[:40],
+                max_rms=round(max_rms, 1),
             )
-            return True
+            return False
 
         while not self._closed:
             # 检查批次是否完成
@@ -1885,6 +1960,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                                 and max_rms >= self._local_fallback_commit_unsafe_min_rms
                             )
                             if should_commit_for_server_final:
+                                if await try_final_open_text_rescue(
+                                    "local_fallback_no_safe_text",
+                                    last_loud_age=last_loud_age,
+                                ):
+                                    break
                                 _latency_log(
                                     "asr_local_fallback_commit_on_no_safe_text",
                                     attempts=local_fallback_attempts,

@@ -172,9 +172,6 @@ class AsyncVocEngineBigModelStreamASRBatch(AsyncRecognitionBatch):
                         self.logger.debug(f"Sent final packet for batch {self.batch_id}")
                         break
 
-                    # 缓冲音频数据
-                    self._audio_buffer.append(audio_data)
-
                     # 发送音频包。提交后也要先把队列里已采集的音频发完，
                     # 再由 None sentinel 发送尾包；否则短句容易被清空成空文本。
                     audio_bytes = nparray_to_bytes(audio_data)
@@ -343,6 +340,7 @@ class AsyncVocEngineBigModelStreamASRBatch(AsyncRecognitionBatch):
             self.logger.warning(f"Buffer closed for batch {self.batch_id}")
             return
 
+        self._audio_buffer.append(audio)
         try:
             self._audio_queue.put_nowait(audio)
         except asyncio.QueueFull:

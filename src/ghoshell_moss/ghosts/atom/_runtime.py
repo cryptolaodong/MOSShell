@@ -47,6 +47,10 @@ _FAST_ACK_PATTERNS = (
 )
 _FAST_CAPABILITY_PATTERNS = (
     "能做什么",
+    "能帮我做什么",
+    "你现在能帮",
+    "可以帮我做什么",
+    "帮我做什么",
     "可以做什么",
     "会做什么",
     "你会什么",
@@ -60,6 +64,11 @@ _FAST_LATENCY_TEST_PATTERNS = (
     ("测试", "等我", "说完"),
     ("等我", "说完", "回答"),
     ("听我说完", "回答"),
+)
+_FAST_LATENCY_COMPLETION_GUARDS = (
+    "这句话全部说完",
+    "全部说完以后",
+    "完整说完以后",
 )
 _FAST_OPINION_PATTERNS = ("怎么样", "如何", "好不好")
 _FAST_BRIEF_PATTERNS = (
@@ -96,6 +105,56 @@ _FAST_BRIEF_ACTION_WORDS = (
     "headmove",
     "emotion",
 )
+_FAST_TEXT_REPLACEMENTS = {
+    "請": "请",
+    "簡": "简",
+    "單": "单",
+    "話": "话",
+    "為": "为",
+    "麼": "么",
+    "時": "时",
+    "什麼": "什么",
+    "歡": "欢",
+    "顏": "颜",
+    "顔": "颜",
+    "覺": "觉",
+    "這": "这",
+    "個": "个",
+    "樣": "样",
+    "會": "会",
+    "機": "机",
+    "聽": "听",
+    "情简直": "请简短",
+    "晴监督我让": "请简短回答",
+    "请简直回答": "请简短回答",
+    "丁秘去换": "用一句话",
+    "为時": "为什么",
+    "为时": "为什么",
+    "姐用": "请用",
+    "解单": "简单",
+    "簡單": "简单",
+    "写单": "简单",
+    "解答": "简单",
+    "请请回答": "请简短回答",
+    "回来": "回答",
+    "回家": "回答",
+    "李觉得": "你觉得",
+    "领觉得": "你觉得",
+    "一尼俊望": "一句话",
+    "进换": "一句话",
+    "一天自己": "今天最喜欢",
+    "自行二十年次": "最喜欢什么颜色",
+    "自己二十年次": "最喜欢什么颜色",
+    "神点色": "什么颜色",
+    "手机的字": "什么颜色",
+    "方法做什么": "能帮我做什么",
+    "法做什么": "能帮我做什么",
+    "我付什么": "帮我做什么",
+    "付什么": "帮我做什么",
+    "去哪儿做": "需要耳朵",
+    "哪儿做": "需要耳朵",
+    "一定躲": "一定等",
+}
 
 
 def _int_env(name: str, default: int) -> int:
@@ -126,6 +185,13 @@ def _fast_brief_default_enabled() -> bool:
     )
 
 
+def _normalize_fast_request_text(text: str) -> str:
+    normalized = _FAST_GREETING_STRIP_RE.sub("", text).lower()
+    for source, target in _FAST_TEXT_REPLACEMENTS.items():
+        normalized = normalized.replace(source, target)
+    return normalized
+
+
 def _request_text(parts) -> str:
     """Extract text-only user content for local deterministic shortcuts."""
     last_text = ""
@@ -137,7 +203,7 @@ def _request_text(parts) -> str:
 
 
 def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
-    normalized = _FAST_GREETING_STRIP_RE.sub("", text).lower()
+    normalized = _normalize_fast_request_text(text)
     if normalized in _FAST_GREETING_WORDS:
         return "greeting", os.environ.get("MOSS_FAST_GREETING_REPLY", "在呢。")
     if (
@@ -160,16 +226,28 @@ def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
                 "我能听你说话、回答问题，并同步表情和头部动作。",
             ),
         )
+    is_latency_probe = any(
+        all(part in normalized for part in pattern)
+        for pattern in _FAST_LATENCY_TEST_PATTERNS
+    )
+    has_latency_completion_guard = any(
+        pattern in normalized
+        for pattern in _FAST_LATENCY_COMPLETION_GUARDS
+    )
+    is_brief_request = any(pattern in normalized for pattern in _FAST_BRIEF_PATTERNS)
     if (
         len(normalized) <= 90
         and not any(word in normalized for word in _FAST_BRIEF_ACTION_WORDS)
-        and any(all(part in normalized for part in pattern) for pattern in _FAST_LATENCY_TEST_PATTERNS)
-        and any(pattern in normalized for pattern in _FAST_BRIEF_PATTERNS)
+        and (is_latency_probe or has_latency_completion_guard)
+        and (is_brief_request or has_latency_completion_guard)
     ):
         return (
             "latency_probe",
             os.environ.get("MOSS_FAST_LATENCY_TEST_REPLY", "我会等你说完，再简短回答。"),
         )
+    brief_qa_reply = _simple_brief_qa_reply_for_text(text)
+    if brief_qa_reply:
+        return brief_qa_reply
     opinion_reply = _simple_opinion_reply_for_text(text)
     if opinion_reply:
         return "brief_opinion", opinion_reply
@@ -181,13 +259,76 @@ def _simple_fast_reply_for_text(text: str) -> str | None:
     return reply
 
 
+def _simple_brief_qa_reply_for_text(text: str) -> tuple[str, str] | None:
+    normalized = _normalize_fast_request_text(text)
+    if not normalized or len(normalized) > 90:
+        return None
+    if any(word in normalized for word in _FAST_BRIEF_ACTION_WORDS):
+        return None
+
+    is_brief = any(pattern in normalized for pattern in _FAST_BRIEF_PATTERNS)
+    if (
+        "能帮我做什么" in normalized
+        or "可以帮我做什么" in normalized
+        or "帮我做什么" in normalized
+    ):
+        if not any(word in normalized for word in _FAST_CAPABILITY_DETAIL_WORDS):
+            return (
+                "capability",
+                os.environ.get(
+                    "MOSS_FAST_CAPABILITY_REPLY",
+                    "我能听你说话、回答问题，并同步表情和头部动作。",
+                ),
+            )
+    if is_brief and (
+        "喜欢什么颜色" in normalized
+        or ("喜欢" in normalized and "颜色" in normalized)
+        or ("为什么" in normalized and "颜色" in normalized)
+    ):
+        return (
+            "brief_color",
+            os.environ.get(
+                "MOSS_FAST_COLOR_REPLY",
+                "我喜欢蓝色，因为它像天空一样安静又可靠。",
+            ),
+        )
+    if is_brief and ("最喜欢做什么" in normalized or ("喜欢" in normalized and "做什么" in normalized)):
+        return (
+            "brief_preference",
+            os.environ.get(
+                "MOSS_FAST_PREFERENCE_REPLY",
+                "我最喜欢听你说话，然后把回答和动作配合好。",
+            ),
+        )
+    if (
+        "为什么" in normalized
+        and (
+            "需要耳朵" in normalized
+            or "机器人为什么需要耳朵" in normalized
+            or ("机器人为什么" in normalized and is_brief)
+        )
+    ):
+        return (
+            "brief_robot_ears",
+            os.environ.get(
+                "MOSS_FAST_ROBOT_EARS_REPLY",
+                "机器人需要耳朵，是为了听见你、理解你，再及时回应你。",
+            ),
+        )
+    return None
+
+
 def _simple_opinion_reply_for_text(text: str) -> str | None:
-    normalized = _FAST_GREETING_STRIP_RE.sub("", text).lower()
+    normalized = _normalize_fast_request_text(text)
     if not normalized:
         return None
     if any(word in normalized for word in _FAST_BRIEF_ACTION_WORDS):
         return None
-    if not any(pattern in normalized for pattern in _FAST_BRIEF_PATTERNS):
+    is_brief = any(pattern in normalized for pattern in _FAST_BRIEF_PATTERNS)
+    if not is_brief and (
+        "回答" not in normalized
+        or any(word in normalized for word in ("详细", "展开", "具体", "长一点"))
+    ):
         return None
     if "你觉得" not in normalized or not any(pattern in normalized for pattern in _FAST_OPINION_PATTERNS):
         return None
@@ -215,7 +356,7 @@ def _simple_opinion_reply_for_text(text: str) -> str | None:
 
 
 def _brief_voice_request_kind(text: str) -> str | None:
-    normalized = _FAST_GREETING_STRIP_RE.sub("", text).lower()
+    normalized = _normalize_fast_request_text(text)
     if not normalized:
         return None
     max_chars = _int_env("MOSS_FAST_BRIEF_MAX_CHARS", 90)

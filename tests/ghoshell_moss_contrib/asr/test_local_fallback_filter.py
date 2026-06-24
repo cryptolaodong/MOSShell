@@ -28,6 +28,11 @@ def test_safe_local_fallback_canonicalizes_wake_homophone() -> None:
     assert _canonicalize_safe_local_fallback_text("小白魚好") == "小白你好"
     assert _canonicalize_safe_local_fallback_text("小白好") == "小白你好"
     assert _canonicalize_safe_local_fallback_text("叫白米好") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("小白以後") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("走來你好") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("小白腰") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("小白魚") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("小白衣") == "小白你好"
 
 
 def test_safe_local_fallback_canonicalizes_noisy_ability_question() -> None:
@@ -78,11 +83,13 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
     assert _canonicalize_open_local_fallback_text(
         "請用聽話解單回答你今天最喜歡什麼字為什麼"
     ).startswith("请用")
+    assert _is_safe_open_local_fallback_text("今天最喜欢什么颜色会什么")
 
 
 def test_open_local_fallback_rejects_short_greeting_and_noise() -> None:
     assert not _is_safe_open_local_fallback_text("小白你好")
     assert not _is_safe_open_local_fallback_text("背景声音测试")
+    assert not _is_safe_open_local_fallback_text("小白请简单回答机器人")
     assert _looks_like_open_request_fragment("")
     assert _looks_like_open_request_fragment("请用一句话")
     assert not _looks_like_open_request_fragment("背景声音测试")
