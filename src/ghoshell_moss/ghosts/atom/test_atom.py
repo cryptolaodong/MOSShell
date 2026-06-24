@@ -391,13 +391,30 @@ class TestAdapter:
         assert _brief_voice_request_kind("小白动动脑袋并用一句话回答") is None
         assert _brief_voice_request_kind("小白点头说收到") is None
 
+    def test_simple_fast_reply_for_direct_body_actions(self):
+        from ._runtime import _simple_fast_reply_for_text, _simple_fast_reply_with_kind
+
+        kind, reply = _simple_fast_reply_with_kind("小白点头说收到")
+        assert kind == "head_move"
+        assert reply == (
+            '<apps.bodies_reachymini:head_move pitch="-8" duration="0.5"/>我点一下头。'
+        )
+
+        kind, reply = _simple_fast_reply_with_kind("小白动动脑袋")
+        assert kind == "head_move"
+        assert reply == (
+            '<apps.bodies_reachymini:head_move yaw="10" duration="0.6"/>我现在动动脑袋。'
+        )
+
+        assert _simple_fast_reply_for_text("小白请点头并用一句话回答你喜欢什么颜色") is None
+
     def test_simple_fast_reply_for_brief_opinion(self):
         from ._runtime import _simple_fast_reply_with_kind
 
         kind, reply = _simple_fast_reply_with_kind("小白你觉得北京这个城市怎么样请用一句话回答")
 
         assert kind == "brief_opinion"
-        assert reply == "我觉得北京这个城市很有生命力，快节奏里也有自己的温度。"
+        assert reply == "我觉得北京这个城市有活力。"
 
     def test_simple_fast_reply_for_common_open_brief_questions(self):
         from ._runtime import _simple_fast_reply_with_kind
@@ -466,21 +483,21 @@ class TestAdapter:
         )
 
         assert kind == "brief_opinion"
-        assert reply == "我觉得北京这个城市很有生命力，快节奏里也有自己的温度。"
+        assert reply == "我觉得北京这个城市有活力。"
 
         kind, reply = _simple_fast_reply_with_kind(
             "小白领觉得北京这个城市怎么样请用一句话回答"
         )
 
         assert kind == "brief_opinion"
-        assert reply == "我觉得北京这个城市很有生命力，快节奏里也有自己的温度。"
+        assert reply == "我觉得北京这个城市有活力。"
 
         kind, reply = _simple_fast_reply_with_kind(
             "小白你觉得北京这个城市怎么样请你进换回答"
         )
 
         assert kind == "brief_opinion"
-        assert reply == "我觉得北京这个城市很有生命力，快节奏里也有自己的温度。"
+        assert reply == "我觉得北京这个城市有活力。"
 
     def test_common_open_brief_fast_reply_keeps_actions_on_full_llm(self):
         from ._runtime import _simple_fast_reply_for_text

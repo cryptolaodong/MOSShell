@@ -105,6 +105,61 @@ _FAST_BRIEF_ACTION_WORDS = (
     "headmove",
     "emotion",
 )
+_FAST_ACTION_NEGATIVE_WORDS = (
+    "不要动",
+    "别动",
+    "不用动",
+    "不动",
+    "不要动作",
+    "别做动作",
+    "不用动作",
+)
+_FAST_ACTION_COMPLEX_WORDS = (
+    "为什么",
+    "怎么样",
+    "如何",
+    "好不好",
+    "喜欢",
+    "颜色",
+    "解释",
+    "说明",
+    "介绍",
+    "同步",
+    "延迟",
+    "问题",
+)
+_FAST_SIMPLE_ACTION_REPLIES = (
+    (
+        ("点头", "点点头", "点一下头", "低头"),
+        "head_move",
+        '<apps.bodies_reachymini:head_move pitch="-8" duration="0.5"/>我点一下头。',
+    ),
+    (
+        ("抬头",),
+        "head_move",
+        '<apps.bodies_reachymini:head_move pitch="8" duration="0.5"/>我抬一下头。',
+    ),
+    (
+        ("看左", "向左看", "往左看"),
+        "head_move",
+        '<apps.bodies_reachymini:head_move yaw="-12" duration="0.6"/>我往左看看。',
+    ),
+    (
+        ("看右", "向右看", "往右看"),
+        "head_move",
+        '<apps.bodies_reachymini:head_move yaw="12" duration="0.6"/>我往右看看。',
+    ),
+    (
+        ("摇头", "摇摇头"),
+        "head_move",
+        '<apps.bodies_reachymini:head_move yaw="12" duration="0.5"/>我摇一下头。',
+    ),
+    (
+        ("动动脑袋", "动一下脑袋", "动动头", "动一下头", "转头", "扭头", "headmove"),
+        "head_move",
+        '<apps.bodies_reachymini:head_move yaw="10" duration="0.6"/>我现在动动脑袋。',
+    ),
+)
 _FAST_TEXT_REPLACEMENTS = {
     "請": "请",
     "簡": "简",
@@ -140,8 +195,14 @@ _FAST_TEXT_REPLACEMENTS = {
     "回家": "回答",
     "李觉得": "你觉得",
     "领觉得": "你觉得",
+    "女觉得": "你觉得",
+    "小板": "小白",
     "一尼俊望": "一句话",
+    "一名据换": "一句话",
+    "一句换": "一句话",
+    "换回的": "话回答",
     "进换": "一句话",
+    "去换": "一句话",
     "一天自己": "今天最喜欢",
     "自行二十年次": "最喜欢什么颜色",
     "自己二十年次": "最喜欢什么颜色",
@@ -156,7 +217,9 @@ _FAST_TEXT_REPLACEMENTS = {
     "一定躲": "一定等",
     "起点的回答": "请简短回答",
     "这位金": "觉得北京",
+    "这不成是": "这个城市",
     "緊用": "请用",
+    "換": "换",
 }
 
 
@@ -229,6 +292,9 @@ def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
                 "我能听你说话、回答问题，并同步表情和头部动作。",
             ),
         )
+    action_reply = _simple_action_reply_for_normalized_text(normalized)
+    if action_reply:
+        return action_reply
     is_latency_probe = any(
         all(part in normalized for part in pattern)
         for pattern in _FAST_LATENCY_TEST_PATTERNS
@@ -260,6 +326,19 @@ def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
 def _simple_fast_reply_for_text(text: str) -> str | None:
     _, reply = _simple_fast_reply_with_kind(text)
     return reply
+
+
+def _simple_action_reply_for_normalized_text(normalized: str) -> tuple[str, str] | None:
+    if len(normalized) > 48:
+        return None
+    if any(word in normalized for word in _FAST_ACTION_NEGATIVE_WORDS):
+        return None
+    if any(word in normalized for word in _FAST_ACTION_COMPLEX_WORDS):
+        return None
+    for patterns, kind, reply in _FAST_SIMPLE_ACTION_REPLIES:
+        if any(pattern in normalized for pattern in patterns):
+            return kind, reply
+    return None
 
 
 def _simple_brief_qa_reply_for_text(text: str) -> tuple[str, str] | None:
@@ -350,12 +429,12 @@ def _simple_opinion_reply_for_text(text: str) -> str | None:
         return None
     template = os.environ.get(
         "MOSS_FAST_OPINION_TEMPLATE",
-        "我觉得{topic}很有生命力，快节奏里也有自己的温度。",
+        "我觉得{topic}有活力。",
     )
     try:
         return template.format(topic=topic)
     except Exception:
-        return f"我觉得{topic}很有生命力，快节奏里也有自己的温度。"
+        return f"我觉得{topic}有活力。"
 
 
 def _brief_voice_request_kind(text: str) -> str | None:

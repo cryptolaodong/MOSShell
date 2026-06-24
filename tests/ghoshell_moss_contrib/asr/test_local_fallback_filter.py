@@ -91,6 +91,13 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
     assert _canonicalize_open_local_fallback_text("想白情簡短回答你最喜歡做什麼") == (
         "小白请简短回答你最喜欢做什么"
     )
+    assert _is_safe_open_local_fallback_text("想把你覺得北京這個城市能量,請用一句話回答")
+    assert (
+        _canonicalize_open_local_fallback_text("想把你覺得北京這個城市能量,請用一句話回答")
+        == "小白你觉得北京这个城市能量请用一句话回答"
+    )
+    assert _is_safe_open_local_fallback_text("想把你覺得北京這個城市怎麼樣?解釋你一句話回答")
+    assert _is_safe_open_local_fallback_text("想完你覺得北京這個城市怎麼樣?請用一句話回答")
     assert _canonicalize_open_local_fallback_text(
         "請用聽話解單回答你今天最喜歡什麼字為什麼"
     ).startswith("请用")

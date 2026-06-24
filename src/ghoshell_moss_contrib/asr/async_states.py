@@ -357,7 +357,9 @@ _OPEN_REQUEST_PREFIX_ONLY = (
 
 _OPEN_REQUEST_WAKE_PREFIXES = (
     "小白",
+    "想把",
     "想白",
+    "想完",
     "小孩",
     "小拜",
     "小百",
