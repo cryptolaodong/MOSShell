@@ -106,6 +106,22 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
     )
     assert _is_safe_open_local_fallback_text("想把你覺得北京這個城市怎麼樣?解釋你一句話回答")
     assert _is_safe_open_local_fallback_text("想完你覺得北京這個城市怎麼樣?請用一句話回答")
+    assert _is_safe_open_local_fallback_text("小怪你好你现在能做什么")
+    assert (
+        _canonicalize_open_local_fallback_text("小怪你好你现在能做什么")
+        == "小白你好你现在能做什么"
+    )
+    assert _is_safe_open_local_fallback_text("嗯…小白你好你现在能做什么")
+    assert (
+        _canonicalize_open_local_fallback_text("嗯…小白你好你现在能做什么")
+        == "小白你好你现在能做什么"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白你好請的摸把這句話全部說完以後,再一一句話回答"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "想白您好請的摸把這句話全部說完以後,再一一句話回答"
+    )
     assert _canonicalize_open_local_fallback_text(
         "請用聽話解單回答你今天最喜歡什麼字為什麼"
     ).startswith("请用")
@@ -148,12 +164,13 @@ def test_open_local_fallback_combines_split_turn_completion_fragments() -> None:
     assert _looks_like_open_local_fallback_prefix_fragment(clipped_first)
     assert not _is_safe_open_local_fallback_text(clipped_first)
     clipped_combined = _combine_open_local_fallback_fragments(clipped_first, clipped_second)
-    assert clipped_combined.startswith("小白要說")
+    assert clipped_combined.startswith("小白要说")
     assert _is_safe_open_local_fallback_text(clipped_combined)
 
 
 def test_open_local_fallback_rejects_short_greeting_and_noise() -> None:
     assert not _is_safe_open_local_fallback_text("小白你好")
+    assert not _is_safe_open_local_fallback_text("小怪你好")
     assert not _is_safe_open_local_fallback_text("背景声音测试")
     assert not _is_safe_open_local_fallback_text("小白请简单回答机器人")
     assert _looks_like_open_request_fragment("")

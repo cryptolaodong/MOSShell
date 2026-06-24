@@ -160,6 +160,7 @@ def _normalize_local_asr_text(text: str) -> str:
         "請": "请",
         "簡": "简",
         "單": "单",
+        "說": "说",
         "時": "时",
         "話": "话",
         "為": "为",
@@ -430,6 +431,7 @@ _OPEN_REQUEST_WAKE_PREFIXES = (
     "小百",
     "小摆",
     "小掰",
+    "小怪",
 )
 
 
@@ -485,6 +487,7 @@ def _looks_like_turn_completion_request_fragment(normalized: str) -> bool:
 def _canonicalize_open_local_fallback_text(text: str) -> str:
     cleaned = _clean_local_asr_text(text)
     normalized = _normalize_local_asr_text(cleaned)
+    normalized = normalized.lstrip("嗯呃啊额噢哦喔…·.")
     if not normalized:
         return ""
 
