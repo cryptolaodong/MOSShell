@@ -1,4 +1,7 @@
-from ghoshell_moss_contrib.asr.voice_turn_gate import VoiceTurnGate
+from ghoshell_moss_contrib.asr.voice_turn_gate import (
+    VoiceTurnGate,
+    looks_like_clipped_address_request,
+)
 
 
 class Clock:
@@ -86,3 +89,29 @@ def test_idle_partial_commit_is_explicitly_configured() -> None:
 
     assert decision.commit
     assert decision.reason == "idle_unaddressed_commit"
+
+
+def test_clipped_address_request_rescue_matches_explicit_requests() -> None:
+    prefixes = ("我想", "请你", "你能")
+    keywords = ("测试", "回答", "做什么")
+
+    assert looks_like_clipped_address_request(
+        "我想测试一下长句子的理解和延迟，请你用一句话回答我",
+        prefixes=prefixes,
+        keywords=keywords,
+    )
+    assert looks_like_clipped_address_request(
+        "请你用一句话回答我现在能做什么",
+        prefixes=prefixes,
+        keywords=keywords,
+    )
+    assert not looks_like_clipped_address_request(
+        "你好",
+        prefixes=prefixes,
+        keywords=keywords,
+    )
+    assert not looks_like_clipped_address_request(
+        "背景里有人聊天但是没有明确请求",
+        prefixes=prefixes,
+        keywords=keywords,
+    )

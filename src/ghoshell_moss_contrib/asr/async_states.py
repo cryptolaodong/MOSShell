@@ -1329,6 +1329,14 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         )
         return True, ready, elapsed, last_loud_age
 
+    def _speech_no_text_ready_to_rotate(self, elapsed: float, last_loud_age: float) -> bool:
+        if elapsed < self._speech_no_text_max_seconds:
+            return False
+        # Long utterances can legitimately take several seconds before the cloud
+        # recognizer emits its first partial. Do not rotate while audio is still
+        # actively arriving; wait for a quiet window so we don't cut the user off.
+        return last_loud_age >= self._speech_no_text_min_quiet_seconds
+
     async def _process_audio_batch(self, audio_queue: deque[np.ndarray]) -> None:
         """处理 PTT 音频批次"""
         global _NO_TEXT_COOLDOWN_UNTIL, _NO_TEXT_FAILURE_COUNT
@@ -1726,7 +1734,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         else float("inf")
                     )
                     hard_elapsed = self._speech_no_text_max_seconds * self._speech_no_text_hard_multiplier
-                    if last_loud_age >= self._speech_no_text_min_quiet_seconds or elapsed >= hard_elapsed:
+                    if self._speech_no_text_ready_to_rotate(elapsed, last_loud_age):
                         reason = "speech_no_text_timeout"
                         if self._speech_no_text_action in {"rotate", "reset", "drop"}:
                             self._commit_reason = reason

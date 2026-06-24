@@ -27,7 +27,11 @@ from ghoshell_moss_contrib.asr.async_concepts import (
 )
 from ghoshell_moss_contrib.asr.async_listener_service import AsyncListenerServiceImpl
 from ghoshell_moss_contrib.asr.configs import ListenerConfig
-from ghoshell_moss_contrib.asr.voice_turn_gate import VoiceTurnDecision, VoiceTurnGate
+from ghoshell_moss_contrib.asr.voice_turn_gate import (
+    VoiceTurnDecision,
+    VoiceTurnGate,
+    looks_like_clipped_address_request,
+)
 from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
     is_speaking as robot_is_speaking,
     mark_thinking as robot_mark_thinking,
@@ -64,27 +68,34 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS": "0.9",
         "MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS": "0.85",
         "MOSS_ASR_LOCAL_FALLBACK_TIMEOUT_SECONDS": "3.0",
-        "MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS": "4.2",
+        "MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS": "2.4",
         "MOSS_ASR_LOCAL_FALLBACK_COMMIT_UNSAFE_MIN_RMS": "2000",
         "MOSS_ASR_LOCAL_FALLBACK_MAX_ATTEMPTS": "2",
         "MOSS_ASR_LOCAL_FALLBACK_RETRY_DELAY_SECONDS": "0.45",
         "MOSS_ASR_LOCAL_FALLBACK_UNSAFE_DROP_MIN_SECONDS": "1.8",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT": "1",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT_MAX_CHARS": "5",
-        "MOSS_ASR_LONG_STABLE_TEXT_COMMIT_SECONDS": "1.8",
-        "MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS": "1.2",
+        "MOSS_ASR_LONG_STABLE_TEXT_COMMIT_SECONDS": "1.15",
+        "MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS": "0.85",
         "MOSS_ASR_LONG_EMPTY_TEXT_COMMIT_SECONDS": "1.8",
         "MOSS_ASR_LONG_EMPTY_TEXT_MIN_QUIET_SECONDS": "1.2",
         "MOSS_ASR_INCOMPLETE_PREFIX_ENABLED": "1",
-        "MOSS_ASR_INCOMPLETE_PREFIX_MIN_QUIET_SECONDS": "1.8",
+        "MOSS_ASR_INCOMPLETE_PREFIX_MIN_QUIET_SECONDS": "1.25",
         "MOSS_ASR_INCOMPLETE_PREFIX_MIN_CHARS": "8",
+        "MOSS_FAST_BRIEF_LLM_ENABLED": "1",
+        "MOSS_FAST_BRIEF_TIMEOUT_SECONDS": "3.0",
+        "MOSS_FAST_BRIEF_MAX_TOKENS": "64",
+        "MOSS_FAST_BRIEF_TEMPERATURE": "0.25",
+        "MOSS_VOICE_CLIPPED_ADDRESS_RESCUE_ENABLED": "1",
+        "MOSS_VOICE_CLIPPED_ADDRESS_MIN_RMS": "3500",
         "MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS": "0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR": "1.0",
         "MOSS_ASR_NO_TEXT_COOLDOWN_MAX_SECONDS": "0",
         "MOSS_ASR_ENERGY_SPEECH_RMS": "1800",
         "MOSS_ASR_INPUT_GATE_RMS": "1800",
         "MOSS_ASR_INPUT_GATE_OPEN_FRAMES": "1",
-        "MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS": "3.2",
+        "MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS": "5.5",
+        "MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS": "1.25",
         "MOSS_ASR_SPEECH_NO_TEXT_HARD_MULTIPLIER": "1.6",
         "MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS": "3.2",
         "MOSS_ASR_INPUT_GATE_PREROLL_SECONDS": "2.0",
@@ -448,7 +459,25 @@ async def main(matrix: Matrix) -> None:
         token.strip()
         for token in os.environ.get(
             "MOSS_VOICE_WAKE_RECOVERY_TOKENS",
-            "你好,在吗,在不在,能做什么,会做什么,能做,做什么,动动,摇头,点头,转头,抬头,低头,跳舞,表情,介绍一下,你是谁",
+            "你好,在吗,在不在,能做什么,会做什么,能做,做什么,为什么,怎么样,如何,喜欢,颜色,等我,说完,一句话,回答,动动,摇头,点头,转头,抬头,低头,跳舞,表情,介绍一下,你是谁",
+        ).split(",")
+        if token.strip()
+    )
+    clipped_address_rescue_enabled = _truthy_env("MOSS_VOICE_CLIPPED_ADDRESS_RESCUE_ENABLED", False)
+    clipped_address_min_rms = float(os.environ.get("MOSS_VOICE_CLIPPED_ADDRESS_MIN_RMS", "3500"))
+    clipped_address_prefixes = tuple(
+        token.strip()
+        for token in os.environ.get(
+            "MOSS_VOICE_CLIPPED_ADDRESS_PREFIXES",
+            "我想,我现在,请你,你能,你可以,帮我,给我,能不能,可以不可以",
+        ).split(",")
+        if token.strip()
+    )
+    clipped_address_keywords = tuple(
+        token.strip()
+        for token in os.environ.get(
+            "MOSS_VOICE_CLIPPED_ADDRESS_KEYWORDS",
+            "回答,测试,延迟,理解,帮,告诉,说,介绍,动,点头,摇头,做什么,能做,会做",
         ).split(",")
         if token.strip()
     )
@@ -550,6 +579,17 @@ async def main(matrix: Matrix) -> None:
                     and not active_before
                     and (armed_recovery_allowed or same_batch_recovery_allowed)
                 )
+                clipped_address_allowed = (
+                    clipped_address_rescue_enabled
+                    and not addressed_before
+                    and not active_before
+                    and audio_max_rms >= clipped_address_min_rms
+                    and looks_like_clipped_address_request(
+                        text,
+                        prefixes=clipped_address_prefixes,
+                        keywords=clipped_address_keywords,
+                    )
+                )
                 weak_local_fallback = False
                 if is_local_fallback and (addressed_before or active_before):
                     min_rms = (
@@ -589,6 +629,23 @@ async def main(matrix: Matrix) -> None:
                         armed_reason=str(_wake_recovery.get("reason") or "")[:60],
                         armed_rms=round(armed_recovery_rms, 1),
                         same_batch=bool(same_batch_recovery_allowed),
+                    )
+                elif clipped_address_allowed:
+                    turn_gate.open_followup_window(now)
+                    gate_decision = VoiceTurnDecision(
+                        accept=True,
+                        reason="clipped_address_rescue",
+                        addressed=False,
+                        active_before=False,
+                        active_left_seconds=0.0,
+                        text_len=len(text),
+                    )
+                    _latency_log(
+                        "voice_clipped_address_rescue_accept",
+                        text_len=len(text),
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        min_rms=round(clipped_address_min_rms, 1),
                     )
                 else:
                     gate_decision = turn_gate.decide_final(text, now)

@@ -129,6 +129,23 @@ def test_incomplete_prefix_guard_waits_for_opening_fragment(monkeypatch) -> None
     assert state._incomplete_prefix_quiet_remaining("小白，我想测试一下。", 0.8) == 0.0
 
 
+def test_speech_no_text_rotate_waits_for_quiet_window(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", "3.2")
+    monkeypatch.setenv("MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS", "0.65")
+
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=_Callback(),
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(_Clock()),
+    )
+
+    assert not state._speech_no_text_ready_to_rotate(5.2, 0.2)
+    assert not state._speech_no_text_ready_to_rotate(3.1, 1.0)
+    assert state._speech_no_text_ready_to_rotate(3.2, 0.65)
+
+
 @pytest.mark.asyncio
 async def test_energy_vad_defers_empty_commit_for_local_fallback(monkeypatch) -> None:
     monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")

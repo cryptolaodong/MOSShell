@@ -55,6 +55,12 @@ _FAST_CAPABILITY_PATTERNS = (
     "有什么功能",
 )
 _FAST_CAPABILITY_DETAIL_WORDS = ("详细", "展开", "具体", "列表", "所有")
+_FAST_LATENCY_TEST_PATTERNS = (
+    ("测试", "延迟"),
+    ("测试", "等我", "说完"),
+    ("等我", "说完", "回答"),
+    ("听我说完", "回答"),
+)
 _FAST_OPINION_PATTERNS = ("怎么样", "如何", "好不好")
 _FAST_BRIEF_PATTERNS = (
     "一句话",
@@ -113,6 +119,13 @@ def _bool_env(name: str, default: bool) -> bool:
     return value.strip().lower() not in {"0", "false", "no", "off", ""}
 
 
+def _fast_brief_default_enabled() -> bool:
+    return bool(
+        os.environ.get("MOSS_VOICE_INPUT_BACKEND")
+        or os.environ.get("REACHY_ROBOT_HOST")
+    )
+
+
 def _request_text(parts) -> str:
     """Extract text-only user content for local deterministic shortcuts."""
     last_text = ""
@@ -146,6 +159,16 @@ def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
                 "MOSS_FAST_CAPABILITY_REPLY",
                 "我能听你说话、回答问题，并同步表情和头部动作。",
             ),
+        )
+    if (
+        len(normalized) <= 90
+        and not any(word in normalized for word in _FAST_BRIEF_ACTION_WORDS)
+        and any(all(part in normalized for part in pattern) for pattern in _FAST_LATENCY_TEST_PATTERNS)
+        and any(pattern in normalized for pattern in _FAST_BRIEF_PATTERNS)
+    ):
+        return (
+            "latency_probe",
+            os.environ.get("MOSS_FAST_LATENCY_TEST_REPLY", "我会等你说完，再简短回答。"),
         )
     opinion_reply = _simple_opinion_reply_for_text(text)
     if opinion_reply:
@@ -373,7 +396,7 @@ class Atom(Ghost):
                 return
 
             brief_kind = _brief_voice_request_kind(request_text)
-            if brief_kind and _bool_env("MOSS_FAST_BRIEF_LLM_ENABLED", False):
+            if brief_kind and _bool_env("MOSS_FAST_BRIEF_LLM_ENABLED", _fast_brief_default_enabled()):
                 yielded_fast_brief = False
                 try:
                     async for text in self._stream_fast_brief_reply(
@@ -517,9 +540,9 @@ class Atom(Ghost):
             os.environ.get("DEEPSEEK_MODEL", "deepseek-v4-flash"),
         )
         base_url = os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1")
-        timeout = _float_env("MOSS_FAST_BRIEF_TIMEOUT_SECONDS", 3.5)
-        max_tokens = _int_env("MOSS_FAST_BRIEF_MAX_TOKENS", 90)
-        temperature = _float_env("MOSS_FAST_BRIEF_TEMPERATURE", 0.35)
+        timeout = _float_env("MOSS_FAST_BRIEF_TIMEOUT_SECONDS", 3.0)
+        max_tokens = _int_env("MOSS_FAST_BRIEF_MAX_TOKENS", 64)
+        temperature = _float_env("MOSS_FAST_BRIEF_TEMPERATURE", 0.25)
         system_prompt = os.environ.get(
             "MOSS_FAST_BRIEF_SYSTEM_PROMPT",
             "你是 Reachy Mini 机器人小白。用中文自然口语回答，最多一句话。"

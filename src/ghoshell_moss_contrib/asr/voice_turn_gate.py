@@ -5,6 +5,34 @@ from dataclasses import dataclass
 from typing import Callable, Sequence
 
 
+def normalize_voice_text(text: str) -> str:
+    normalized = (text or "").strip().lower()
+    normalized = normalized.strip(" \t\r\n，,。！？!?；;：:")
+    for mark in ("，", ",", "。", "！", "!", "？", "?", "；", ";", "：", ":", "、"):
+        normalized = normalized.replace(mark, "")
+    return normalized.replace(" ", "")
+
+
+def looks_like_clipped_address_request(
+    text: str,
+    *,
+    prefixes: Sequence[str],
+    keywords: Sequence[str],
+    min_chars: int = 12,
+    max_chars: int = 90,
+) -> bool:
+    normalized = normalize_voice_text(text)
+    if not normalized or len(normalized) < min_chars or len(normalized) > max_chars:
+        return False
+    cleaned_prefixes = tuple(normalize_voice_text(prefix) for prefix in prefixes if prefix)
+    cleaned_keywords = tuple(normalize_voice_text(keyword) for keyword in keywords if keyword)
+    if not cleaned_prefixes or not cleaned_keywords:
+        return False
+    if not any(normalized.startswith(prefix) for prefix in cleaned_prefixes):
+        return False
+    return any(keyword in normalized for keyword in cleaned_keywords)
+
+
 @dataclass(frozen=True)
 class VoiceTurnDecision:
     accept: bool

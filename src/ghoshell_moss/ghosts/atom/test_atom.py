@@ -326,11 +326,36 @@ class TestAdapter:
         )
         assert _simple_fast_reply_for_text("你能做什么，详细展开讲讲") is None
 
+    def test_simple_fast_reply_for_latency_probe(self):
+        from ._runtime import _simple_fast_reply_with_kind
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白我想测试一下长句子的理解和延迟，请你一定等我这句话全部说完以后，再用一句话简单回答我。"
+        )
+
+        assert kind == "latency_probe"
+        assert reply == "我会等你说完，再简短回答。"
+        clipped_kind, clipped_reply = _simple_fast_reply_with_kind(
+            "请你一定等我这句话全部说完以后，再用一句话简单回答我"
+        )
+        assert clipped_kind == "latency_probe"
+        assert clipped_reply == "我会等你说完，再简短回答。"
+
     def test_brief_voice_request_routes_to_brief_llm(self):
         from ._runtime import _brief_voice_request_kind
 
         assert _brief_voice_request_kind("小白你觉得北京这个城市怎么样请用一句话回答") == "brief_llm"
         assert _brief_voice_request_kind("小白请简短回答你喜欢什么颜色") == "brief_llm"
+
+    def test_brief_llm_defaults_on_for_reachy_voice(self, monkeypatch):
+        from ._runtime import _fast_brief_default_enabled
+
+        monkeypatch.delenv("MOSS_VOICE_INPUT_BACKEND", raising=False)
+        monkeypatch.delenv("REACHY_ROBOT_HOST", raising=False)
+        assert not _fast_brief_default_enabled()
+
+        monkeypatch.setenv("MOSS_VOICE_INPUT_BACKEND", "reachy")
+        assert _fast_brief_default_enabled()
 
     def test_brief_voice_request_keeps_body_actions_on_full_llm(self):
         from ._runtime import _brief_voice_request_kind
