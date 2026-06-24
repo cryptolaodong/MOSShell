@@ -92,7 +92,7 @@ def test_idle_partial_commit_is_explicitly_configured() -> None:
 
 
 def test_clipped_address_request_rescue_matches_explicit_requests() -> None:
-    prefixes = ("我想", "请你", "你能")
+    prefixes = ("我想", "请你", "请用", "你能")
     keywords = ("测试", "回答", "做什么")
 
     assert looks_like_clipped_address_request(
@@ -102,6 +102,11 @@ def test_clipped_address_request_rescue_matches_explicit_requests() -> None:
     )
     assert looks_like_clipped_address_request(
         "请你用一句话回答我现在能做什么",
+        prefixes=prefixes,
+        keywords=keywords,
+    )
+    assert looks_like_clipped_address_request(
+        "請用聽話解單回答你今天最喜歡什麼字為什麼",
         prefixes=prefixes,
         keywords=keywords,
     )

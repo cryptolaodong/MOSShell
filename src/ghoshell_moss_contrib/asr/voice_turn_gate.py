@@ -7,6 +7,27 @@ from typing import Callable, Sequence
 
 def normalize_voice_text(text: str) -> str:
     normalized = (text or "").strip().lower()
+    replacements = {
+        "請": "请",
+        "簡": "简",
+        "單": "单",
+        "話": "话",
+        "為": "为",
+        "麼": "么",
+        "什麼": "什么",
+        "歡": "欢",
+        "顏": "颜",
+        "顔": "颜",
+        "覺": "觉",
+        "這": "这",
+        "個": "个",
+        "樣": "样",
+        "會": "会",
+        "機": "机",
+        "聽": "听",
+    }
+    for source, target in replacements.items():
+        normalized = normalized.replace(source, target)
     normalized = normalized.strip(" \t\r\n，,。！？!?；;：:")
     for mark in ("，", ",", "。", "！", "!", "？", "?", "；", ";", "：", ":", "、"):
         normalized = normalized.replace(mark, "")

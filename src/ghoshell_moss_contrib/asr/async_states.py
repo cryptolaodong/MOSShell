@@ -122,6 +122,20 @@ def _normalize_local_asr_text(text: str) -> str:
         "什麼": "什么",
         "嗎": "吗",
         "會": "会",
+        "請": "请",
+        "簡": "简",
+        "單": "单",
+        "話": "话",
+        "為": "为",
+        "歡": "欢",
+        "顏": "颜",
+        "顔": "颜",
+        "覺": "觉",
+        "這": "这",
+        "個": "个",
+        "樣": "样",
+        "聽": "听",
+        "機": "机",
         "臺": "台",
         "妳": "你",
         "線": "线",
@@ -281,6 +295,101 @@ def _is_safe_local_fallback_text(text: str) -> bool:
             for token in ("能做什么", "会做什么", "介绍一下", "你是谁")
         )
     return False
+
+
+_OPEN_REQUEST_KEYWORDS = (
+    "回答",
+    "一句话",
+    "简短",
+    "简单",
+    "为什么",
+    "怎么样",
+    "如何",
+    "喜欢",
+    "颜色",
+    "做什么",
+    "能帮",
+    "帮我",
+    "介绍",
+    "等我",
+    "说完",
+)
+
+_OPEN_REQUEST_WAKE_PREFIXES = (
+    "小白",
+    "想白",
+    "小孩",
+    "小拜",
+    "小百",
+    "小摆",
+    "小掰",
+)
+
+
+def _canonicalize_open_local_fallback_text(text: str) -> str:
+    cleaned = _clean_local_asr_text(text)
+    normalized = _normalize_local_asr_text(cleaned)
+    if not normalized:
+        return ""
+
+    for wake in _OPEN_REQUEST_WAKE_PREFIXES:
+        if normalized.startswith(wake):
+            body = normalized[len(wake):]
+            if body.startswith(("情", "晴")) and any(
+                token in body for token in ("简短", "简单", "一句话", "回答")
+            ):
+                body = f"请{body[1:]}"
+            if body and any(token in body for token in _OPEN_REQUEST_KEYWORDS):
+                return f"小白{body}"
+            return cleaned
+
+    if normalized.startswith(("情", "晴")) and any(
+        token in normalized for token in ("简短", "简单", "一句话", "回答")
+    ):
+        return f"请{normalized[1:]}"
+    clipped_prefixes = (
+        "请用",
+        "请简单",
+        "请简短",
+        "简单回答",
+        "简短回答",
+        "你觉得",
+        "最喜欢",
+        "机器人为什么",
+    )
+    if normalized.startswith(clipped_prefixes):
+        return normalized
+    return cleaned
+
+
+def _is_safe_open_local_fallback_text(text: str) -> bool:
+    normalized = _normalize_local_asr_text(_canonicalize_open_local_fallback_text(text))
+    if not 6 <= len(normalized) <= 90:
+        return False
+    if not any(token in normalized for token in _OPEN_REQUEST_KEYWORDS):
+        return False
+    if normalized.startswith("小白") and len(normalized) > 4:
+        return True
+    clipped_prefixes = (
+        "请用",
+        "请简单",
+        "请简短",
+        "简单回答",
+        "简短回答",
+        "你觉得",
+        "最喜欢",
+        "机器人为什么",
+    )
+    return normalized.startswith(clipped_prefixes)
+
+
+def _looks_like_open_request_fragment(text: str) -> bool:
+    normalized = _normalize_local_asr_text(text)
+    if not normalized:
+        return True
+    if len(normalized) > 30:
+        return False
+    return any(token in normalized for token in _OPEN_REQUEST_KEYWORDS)
 
 
 def _local_whisper_transcribe(
@@ -866,6 +975,24 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             _int_env("MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT_MAX_CHARS", 5),
         )
         self._save_safe_local_fallback_audio = _bool_env("MOSS_ASR_SAVE_SAFE_LOCAL_FALLBACK_AUDIO", False)
+        self._final_open_fallback_enabled = _bool_env("MOSS_ASR_FINAL_OPEN_FALLBACK_ENABLED", False)
+        self._final_open_fallback_min_rms = _float_env("MOSS_ASR_FINAL_OPEN_FALLBACK_MIN_RMS", 2400.0)
+        self._final_open_fallback_model = (
+            os.environ.get(
+                "MOSS_ASR_FINAL_OPEN_FALLBACK_MODEL",
+                self._local_fallback_rescue_model or self._local_fallback_model,
+            ).strip()
+            or self._local_fallback_model
+        )
+        self._final_open_fallback_timeout_seconds = _float_env(
+            "MOSS_ASR_FINAL_OPEN_FALLBACK_TIMEOUT_SECONDS",
+            max(self._local_fallback_timeout_seconds, 3.5),
+        )
+        self._final_open_fallback_max_audio_seconds = _float_env(
+            "MOSS_ASR_FINAL_OPEN_FALLBACK_MAX_AUDIO_SECONDS",
+            max(self._local_fallback_max_audio_seconds, 8.0),
+        )
+        self._local_fallback_final_emitted = False
         self._batch_started_at = 0.0
         self._committed_at = 0.0
 
@@ -885,6 +1012,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._last_text_change_time = 0.0
         self._commit_reason = ""
         self._commit_audio_max_rms = 0.0
+        self._local_fallback_final_emitted = False
         self._batch_started_at = time.time()
         self._committed_at = 0.0
 
@@ -968,6 +1096,16 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._seq += 1
         result.seq = self._seq
 
+        if self._closed and self._local_fallback_final_emitted:
+            _latency_log(
+                "asr_late_final_after_local_fallback_drop",
+                is_last=result.is_last,
+                text_len=len((result.text or "").strip()),
+                text_preview=(result.text or "")[:40],
+                commit_reason=self._commit_reason,
+            )
+            return
+
         self._last_recognition = result
         # 跟踪最后一条非空识别结果
         if result.text and result.text.strip():
@@ -1045,7 +1183,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 "speech_no_text_action=%s hard=%.2fx empty_retry=%s retry_min_rms=%.1f "
                 "input_gate=%s gate_rms=%.1f gate_pre=%.2fs gate_tail=%.2fs "
                 "gate_open_frames=%d no_text_cooldown=%.2fs factor=%.2f max=%.2fs "
-                "local_fallback=%s local_model=%s local_min_rms=%.1f local_quiet=%.2fs drop_unsafe=%s",
+                "local_fallback=%s local_model=%s local_min_rms=%.1f local_quiet=%.2fs drop_unsafe=%s "
+                "final_open=%s final_open_model=%s final_open_min_rms=%.1f",
                 getattr(self._vad, "_silence_hold_time", None),
                 getattr(self._vad, "_speech_threshold", None),
                 getattr(self._vad, "_silence_threshold", None),
@@ -1083,6 +1222,9 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._local_fallback_min_rms,
                 self._local_fallback_quiet_seconds,
                 self._local_fallback_drop_unsafe,
+                self._final_open_fallback_enabled,
+                self._final_open_fallback_model,
+                self._final_open_fallback_min_rms,
             )
             _latency_log(
                 "asr_tuning",
@@ -1140,6 +1282,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 local_fallback_rescue_unsafe_short_max_chars=(
                     self._local_fallback_rescue_unsafe_short_max_chars
                 ),
+                final_open_fallback=self._final_open_fallback_enabled,
+                final_open_fallback_min_rms=self._final_open_fallback_min_rms,
+                final_open_fallback_model=self._final_open_fallback_model,
+                final_open_fallback_timeout=self._final_open_fallback_timeout_seconds,
+                final_open_fallback_max_audio=self._final_open_fallback_max_audio_seconds,
             )
 
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
@@ -1329,6 +1476,17 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         )
         return True, ready, elapsed, last_loud_age
 
+    def _should_try_final_open_fallback(self, text: str, *, max_rms: float) -> bool:
+        if (
+            not self._final_open_fallback_enabled
+            or not self._local_fallback_enabled
+            or max_rms < self._final_open_fallback_min_rms
+        ):
+            return False
+        if text and _is_safe_local_fallback_text(text):
+            return False
+        return _looks_like_open_request_fragment(text)
+
     def _speech_no_text_ready_to_rotate(self, elapsed: float, last_loud_age: float) -> bool:
         if elapsed < self._speech_no_text_max_seconds:
             return False
@@ -1359,6 +1517,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         cooldown_skip_logged = False
         local_fallback_attempts = 0
         local_fallback_next_after = 0.0
+        final_open_fallback_attempted = False
         incomplete_prefix_defer_last_log = 0.0
 
         async def try_unsafe_short_text_rescue(reason: str) -> bool:
@@ -1434,6 +1593,57 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 )
                 return True
             return False
+
+        async def try_final_open_text_rescue(reason: str, *, last_loud_age: float) -> bool:
+            nonlocal final_open_fallback_attempted
+            if final_open_fallback_attempted:
+                return False
+            if not has_speech or self._current_batch is None:
+                return False
+            if not self._should_try_final_open_fallback(
+                self._last_non_empty_text,
+                max_rms=max_rms,
+            ):
+                return False
+            final_open_fallback_attempted = True
+            _latency_log(
+                "asr_final_open_fallback_try",
+                reason=reason,
+                text_len=len(self._last_non_empty_text.strip()),
+                text_preview=self._last_non_empty_text[:40],
+                max_rms=round(max_rms, 1),
+                last_loud_age=round(last_loud_age, 3)
+                if last_loud_age != float("inf")
+                else None,
+                model=self._final_open_fallback_model,
+            )
+            fallback_text = await self._try_local_fallback(
+                reason="final_open_fallback",
+                max_rms=max_rms,
+                last_loud_age=last_loud_age,
+                allow_open_request=True,
+                model_name=self._final_open_fallback_model,
+                timeout_seconds=self._final_open_fallback_timeout_seconds,
+                max_audio_seconds=self._final_open_fallback_max_audio_seconds,
+            )
+            if not fallback_text or not _is_safe_open_local_fallback_text(fallback_text):
+                _latency_log(
+                    "asr_final_open_fallback_miss",
+                    reason=reason,
+                    text_len=len(fallback_text or ""),
+                    text_preview=(fallback_text or "")[:40],
+                    max_rms=round(max_rms, 1),
+                )
+                return False
+            global _NO_TEXT_FAILURE_COUNT
+            _NO_TEXT_FAILURE_COUNT = 0
+            await self._finish_with_local_fallback(
+                fallback_text,
+                reason="final_open_fallback",
+                max_rms=max_rms,
+                last_loud_age=last_loud_age,
+            )
+            return True
 
         while not self._closed:
             # 检查批次是否完成
@@ -1567,6 +1777,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                                 if self._closed:
                                     break
                                 continue
+                            if await try_final_open_text_rescue(
+                                "energy_vad",
+                                last_loud_age=quiet_elapsed,
+                            ):
+                                break
                             await self._do_auto_commit(
                                 "energy_vad",
                                 max_rms=round(max_rms, 1),
@@ -1736,6 +1951,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     hard_elapsed = self._speech_no_text_max_seconds * self._speech_no_text_hard_multiplier
                     if self._speech_no_text_ready_to_rotate(elapsed, last_loud_age):
                         reason = "speech_no_text_timeout"
+                        if await try_final_open_text_rescue(
+                            reason,
+                            last_loud_age=last_loud_age,
+                        ):
+                            break
                         if self._speech_no_text_action in {"rotate", "reset", "drop"}:
                             self._commit_reason = reason
                             self._logger.info(
@@ -1810,6 +2030,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                             break
                         await asyncio.sleep(0.01)
                         continue
+                    if await try_final_open_text_rescue(
+                        "audio_idle",
+                        last_loud_age=quiet_elapsed,
+                    ):
+                        break
                     self._logger.info(
                         f"Audio queue idle for {audio_idle:.1f}s after speech, auto-committing"
                     )
@@ -1866,6 +2091,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                             break
                         await asyncio.sleep(0.01)
                         continue
+                    if await try_final_open_text_rescue(
+                        f"stable_text_{threshold_kind}",
+                        last_loud_age=quiet_elapsed,
+                    ):
+                        break
                     self._logger.info(
                         "ASR stable text timeout (%.1fs, threshold=%.1fs kind=%s, quiet=%.1fs min_quiet=%.1fs, text=%r), auto-committing",
                         stable_elapsed,
@@ -1921,6 +2151,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                             break
                         await asyncio.sleep(0.01)
                         continue
+                    if await try_final_open_text_rescue(
+                        "empty_text_timeout",
+                        last_loud_age=quiet_elapsed,
+                    ):
+                        break
                     self._logger.info(
                         "ASR empty text timeout (%.1fs, threshold=%.1fs kind=%s, quiet=%.1fs min_quiet=%.1fs), auto-committing",
                         elapsed,
@@ -2042,7 +2277,17 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         )
         await self._callback.save_batch(rec, audio)
 
-    async def _try_local_fallback(self, *, reason: str, max_rms: float, last_loud_age: float) -> str:
+    async def _try_local_fallback(
+        self,
+        *,
+        reason: str,
+        max_rms: float,
+        last_loud_age: float,
+        allow_open_request: bool = False,
+        model_name: str | None = None,
+        timeout_seconds: float | None = None,
+        max_audio_seconds: float | None = None,
+    ) -> str:
         if self._current_batch is None:
             return ""
         try:
@@ -2055,8 +2300,19 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
 
         sample_rate = int(getattr(self._recognizer, "sample_rate", 16000) or 16000)
         flat = np.asarray(audio).reshape(-1)
-        if self._local_fallback_max_audio_seconds > 0:
-            max_samples = int(sample_rate * self._local_fallback_max_audio_seconds)
+        effective_model_name = model_name or self._local_fallback_model
+        effective_timeout_seconds = (
+            timeout_seconds
+            if timeout_seconds is not None
+            else self._local_fallback_timeout_seconds
+        )
+        effective_max_audio_seconds = (
+            max_audio_seconds
+            if max_audio_seconds is not None
+            else self._local_fallback_max_audio_seconds
+        )
+        if effective_max_audio_seconds > 0:
+            max_samples = int(sample_rate * effective_max_audio_seconds)
             if len(flat) > max_samples:
                 flat = flat[-max_samples:]
         if self._local_fallback_pad_seconds > 0:
@@ -2073,7 +2329,8 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             duration=round(len(flat) / sample_rate, 3) if sample_rate > 0 else 0.0,
             max_rms=round(max_rms, 1),
             last_loud_age=round(last_loud_age, 3),
-            model=self._local_fallback_model,
+            model=effective_model_name,
+            allow_open_request=allow_open_request,
         )
         try:
             text = await asyncio.wait_for(
@@ -2081,19 +2338,19 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     _local_whisper_transcribe,
                     flat,
                     sample_rate=sample_rate,
-                    model_name=self._local_fallback_model,
+                    model_name=effective_model_name,
                     cache_dir=self._local_fallback_cache_dir,
                     site_packages=self._local_fallback_site_packages,
                     initial_prompt=self._local_fallback_initial_prompt,
                 ),
-                timeout=max(0.1, self._local_fallback_timeout_seconds),
+                timeout=max(0.1, effective_timeout_seconds),
             )
         except asyncio.TimeoutError:
             _latency_log(
                 "asr_local_fallback_timeout",
                 reason=reason,
                 elapsed=round(time.time() - started, 3),
-                timeout=self._local_fallback_timeout_seconds,
+                timeout=effective_timeout_seconds,
             )
             return ""
         except Exception as e:
@@ -2131,12 +2388,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         _local_whisper_transcribe,
                         flat,
                         sample_rate=sample_rate,
-                        model_name=self._local_fallback_model,
+                        model_name=effective_model_name,
                         cache_dir=self._local_fallback_cache_dir,
                         site_packages=self._local_fallback_site_packages,
                         initial_prompt=self._local_fallback_rescue_prompt,
                     ),
-                    timeout=max(0.1, self._local_fallback_timeout_seconds),
+                    timeout=max(0.1, effective_timeout_seconds),
                 )
             except Exception as e:
                 _latency_log(
@@ -2165,7 +2422,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         if (
             text
             and self._local_fallback_rescue_model
-            and self._local_fallback_rescue_model != self._local_fallback_model
+            and self._local_fallback_rescue_model != effective_model_name
             and not _is_safe_local_fallback_text(text)
             and _looks_like_rescuable_wake_second_pass(_normalize_local_asr_text(text))
         ):
@@ -2188,7 +2445,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         site_packages=self._local_fallback_site_packages,
                         initial_prompt=self._local_fallback_rescue_prompt,
                     ),
-                    timeout=max(0.1, self._local_fallback_timeout_seconds),
+                    timeout=max(0.1, effective_timeout_seconds),
                 )
             except Exception as e:
                 _latency_log(
@@ -2224,6 +2481,17 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         text_len=len(rescue_model_text),
                         text_preview=rescue_model_text[:40],
                     )
+        if allow_open_request and text:
+            open_text = _canonicalize_open_local_fallback_text(text)
+            if _is_safe_open_local_fallback_text(open_text):
+                _latency_log(
+                    "asr_local_fallback_open_accept",
+                    reason=reason,
+                    text_len=len(open_text),
+                    text_preview=open_text[:40],
+                    model=effective_model_name,
+                )
+                return open_text
         if text and not _is_safe_local_fallback_text(text):
             _latency_log(
                 "asr_local_fallback_reject",
@@ -2247,6 +2515,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         if not text:
             return
         self._commit_reason = reason
+        self._local_fallback_final_emitted = True
         self._last_non_empty_text = text
         now = time.time()
         self._last_non_empty_recognition_time = now

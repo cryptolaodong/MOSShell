@@ -1,6 +1,9 @@
 from ghoshell_moss_contrib.asr.async_states import (
+    _canonicalize_open_local_fallback_text,
     _canonicalize_safe_local_fallback_text,
+    _is_safe_open_local_fallback_text,
     _is_safe_local_fallback_text,
+    _looks_like_open_request_fragment,
     _looks_like_rescuable_wake_second_pass,
     _looks_like_rescuable_short_wake_fragment,
     _normalize_local_asr_text,
@@ -58,3 +61,28 @@ def test_rescue_model_only_runs_on_short_wake_like_fragments() -> None:
         assert _looks_like_rescuable_wake_second_pass(_normalize_local_asr_text(text))
     for text in ("我", "請問一下", "小明好", "小白米酒", "背景声音测试"):
         assert not _looks_like_rescuable_wake_second_pass(_normalize_local_asr_text(text))
+
+
+def test_open_local_fallback_accepts_addressed_questions() -> None:
+    assert _is_safe_open_local_fallback_text("小白晴,用一句话简单回答你,今天最喜欢什么颜色,为什么?")
+    assert (
+        _canonicalize_open_local_fallback_text(
+            "小白晴,用一句话简单回答你,今天最喜欢什么颜色,为什么?"
+        )
+        == "小白请用一句话简单回答你今天最喜欢什么颜色为什么"
+    )
+    assert _is_safe_open_local_fallback_text("小孩请用一句话解的回答你今天最喜欢什么演奏为什么")
+    assert _canonicalize_open_local_fallback_text("想白情簡短回答你最喜歡做什麼") == (
+        "小白请简短回答你最喜欢做什么"
+    )
+    assert _canonicalize_open_local_fallback_text(
+        "請用聽話解單回答你今天最喜歡什麼字為什麼"
+    ).startswith("请用")
+
+
+def test_open_local_fallback_rejects_short_greeting_and_noise() -> None:
+    assert not _is_safe_open_local_fallback_text("小白你好")
+    assert not _is_safe_open_local_fallback_text("背景声音测试")
+    assert _looks_like_open_request_fragment("")
+    assert _looks_like_open_request_fragment("请用一句话")
+    assert not _looks_like_open_request_fragment("背景声音测试")

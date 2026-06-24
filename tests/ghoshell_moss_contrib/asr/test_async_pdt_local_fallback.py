@@ -468,3 +468,173 @@ async def test_rescue_model_rejects_unsafe_second_pass(monkeypatch) -> None:
 
     assert text == ""
     assert calls == ["tiny", "base"]
+
+
+@pytest.mark.asyncio
+async def test_open_local_fallback_accepts_addressed_question(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_CACHE_DIR", "")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_SITE_PACKAGES", "")
+
+    calls = []
+
+    def transcribe(audio, *, sample_rate, model_name, cache_dir, site_packages, initial_prompt):
+        calls.append(model_name)
+        return "小白晴,用一句话简单回答你,今天最喜欢什么颜色,为什么?"
+
+    monkeypatch.setattr(async_states, "_local_whisper_transcribe", transcribe)
+
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=_Callback(),
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(_Clock()),
+    )
+    batch = _Batch()
+    batch.buffered.append(np.full(1600, 3000, dtype=np.int16))
+    state._current_batch = batch
+
+    text = await state._try_local_fallback(
+        reason="final_open_fallback",
+        max_rms=3000,
+        last_loud_age=1.0,
+        allow_open_request=True,
+        model_name="base",
+        timeout_seconds=3.5,
+        max_audio_seconds=8.0,
+    )
+
+    assert text.startswith("小白请用一句话")
+    assert "颜色" in text
+    assert calls == ["base"]
+
+
+@pytest.mark.asyncio
+async def test_final_open_fallback_recovers_empty_high_energy(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_MIN_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_QUIET_SECONDS", "0.2")
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_TRIGGER_MAX_SECONDS", "0.1")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_MIN_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_MODEL", "base")
+    monkeypatch.setenv("MOSS_ASR_INPUT_GATE_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", "10")
+
+    clock = _Clock()
+    monkeypatch.setattr(async_states.time, "time", clock.time)
+
+    callback = _Callback()
+    batch = _Batch()
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=callback,
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(clock),
+    )
+    state._current_batch = batch
+    state._batch_started_at = clock.time() - 1.0
+
+    fallback_calls = []
+
+    async def _try_local_fallback(**kwargs) -> str:
+        fallback_calls.append(kwargs)
+        return "小白请简单回答机器人为什么需要耳朵"
+
+    state._try_local_fallback = _try_local_fallback
+
+    loud = np.full(1600, 2000, dtype=np.int16)
+    quiet = np.zeros(1600, dtype=np.int16)
+
+    await state._process_audio_batch(deque([loud, quiet]))
+
+    assert fallback_calls
+    assert fallback_calls[0]["reason"] == "final_open_fallback"
+    assert fallback_calls[0]["model_name"] == "base"
+    assert batch.commits == 0
+    assert callback.recognitions[-1].text == "小白请简单回答机器人为什么需要耳朵"
+    assert callback.recognitions[-1].commit_reason == "final_open_fallback"
+
+
+@pytest.mark.asyncio
+async def test_final_open_fallback_recovers_mid_fragment(monkeypatch) -> None:
+    monkeypatch.setenv("MOSS_ASR_LOCAL_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_ENABLED", "1")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_MIN_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_FINAL_OPEN_FALLBACK_MODEL", "base")
+    monkeypatch.setenv("MOSS_ASR_INPUT_GATE_RMS", "500")
+    monkeypatch.setenv("MOSS_ASR_STABLE_TEXT_COMMIT_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_STABLE_SHORT_MIN_QUIET_SECONDS", "0")
+    monkeypatch.setenv("MOSS_ASR_AUDIO_IDLE_COMMIT_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", "10")
+    monkeypatch.setenv("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", "10")
+
+    clock = _Clock()
+    monkeypatch.setattr(async_states.time, "time", clock.time)
+
+    callback = _Callback()
+    batch = _Batch()
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=callback,
+        logger=_Logger(),
+        vad=None,
+    )
+    state._current_batch = batch
+    state._batch_started_at = clock.time()
+    state._last_non_empty_text = "请用一句话"
+    state._last_non_empty_recognition_time = clock.time() - 1
+    state._last_text_change_time = clock.time() - 1
+
+    fallback_calls = []
+
+    async def _try_local_fallback(**kwargs) -> str:
+        fallback_calls.append(kwargs)
+        return "小白请用一句话简单回答你今天最喜欢什么颜色为什么"
+
+    state._try_local_fallback = _try_local_fallback
+
+    loud = np.full(1600, 2000, dtype=np.int16)
+
+    await state._process_audio_batch(deque([loud]))
+
+    assert fallback_calls
+    assert fallback_calls[0]["reason"] == "final_open_fallback"
+    assert batch.commits == 0
+    assert callback.recognitions[-1].text.startswith("小白请用一句话")
+    assert callback.recognitions[-1].commit_reason == "final_open_fallback"
+
+
+@pytest.mark.asyncio
+async def test_late_cloud_final_after_local_fallback_is_dropped() -> None:
+    callback = _Callback()
+    state = AsyncPdtListeningState(
+        recognizer=SimpleNamespace(sample_rate=16000, frame_duration=0.1),
+        audio_input=SimpleNamespace(),
+        callback=callback,
+        logger=_Logger(),
+        vad=_CommitOnQuietVad(_Clock()),
+    )
+
+    await state._finish_with_local_fallback(
+        "小白请简单回答机器人为什么需要耳朵",
+        reason="final_open_fallback",
+        max_rms=3000,
+        last_loud_age=1.0,
+    )
+    await state.on_recognition(
+        Recognition(
+            text="小白，请简单回答机器人为什么需要耳朵",
+            is_last=True,
+        )
+    )
+
+    assert len(callback.recognitions) == 1
+    assert callback.recognitions[0].text == "小白请简单回答机器人为什么需要耳朵"

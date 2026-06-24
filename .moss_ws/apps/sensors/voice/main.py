@@ -75,6 +75,11 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_LOCAL_FALLBACK_UNSAFE_DROP_MIN_SECONDS": "1.8",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT": "1",
         "MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT_MAX_CHARS": "5",
+        "MOSS_ASR_FINAL_OPEN_FALLBACK_ENABLED": "1",
+        "MOSS_ASR_FINAL_OPEN_FALLBACK_MIN_RMS": "2400",
+        "MOSS_ASR_FINAL_OPEN_FALLBACK_MODEL": "base",
+        "MOSS_ASR_FINAL_OPEN_FALLBACK_TIMEOUT_SECONDS": "3.5",
+        "MOSS_ASR_FINAL_OPEN_FALLBACK_MAX_AUDIO_SECONDS": "8.0",
         "MOSS_ASR_LONG_STABLE_TEXT_COMMIT_SECONDS": "1.15",
         "MOSS_ASR_STABLE_TEXT_MIN_QUIET_SECONDS": "0.85",
         "MOSS_ASR_LONG_EMPTY_TEXT_COMMIT_SECONDS": "1.8",
@@ -469,7 +474,7 @@ async def main(matrix: Matrix) -> None:
         token.strip()
         for token in os.environ.get(
             "MOSS_VOICE_CLIPPED_ADDRESS_PREFIXES",
-            "我想,我现在,请你,你能,你可以,帮我,给我,能不能,可以不可以",
+            "我想,我现在,请你,请用,请简单,请简短,简单回答,简短回答,你觉得,你能,你可以,帮我,给我,机器人为什么,能不能,可以不可以",
         ).split(",")
         if token.strip()
     )
@@ -477,7 +482,7 @@ async def main(matrix: Matrix) -> None:
         token.strip()
         for token in os.environ.get(
             "MOSS_VOICE_CLIPPED_ADDRESS_KEYWORDS",
-            "回答,测试,延迟,理解,帮,告诉,说,介绍,动,点头,摇头,做什么,能做,会做",
+            "回答,一句话,简单,简短,为什么,怎么样,如何,喜欢,颜色,测试,延迟,理解,帮,告诉,说,介绍,动,点头,摇头,做什么,能做,会做",
         ).split(",")
         if token.strip()
     )
