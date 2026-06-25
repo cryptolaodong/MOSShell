@@ -4,6 +4,8 @@ from ghoshell_moss_contrib.asr.async_states import (
     _canonicalize_safe_local_fallback_text,
     _is_safe_open_local_fallback_text,
     _is_safe_local_fallback_text,
+    _looks_like_high_rms_ability_request_mishear,
+    _looks_like_high_rms_short_wake_mishear,
     _looks_like_open_local_fallback_prefix_fragment,
     _looks_like_open_request_fragment,
     _looks_like_rescuable_wake_second_pass,
@@ -91,6 +93,23 @@ def test_rescue_model_only_runs_on_short_wake_like_fragments() -> None:
         assert not _looks_like_rescuable_wake_second_pass(_normalize_local_asr_text(text))
 
 
+def test_high_rms_short_wake_mishear_is_narrow() -> None:
+    for text in ("等待米好", "小白米", "小白猫", "早掰你好"):
+        assert _looks_like_high_rms_short_wake_mishear(_normalize_local_asr_text(text))
+
+    for text in ("小白米酒", "小明好", "背景声音测试", "等待我说完", "小白你好我想"):
+        assert not _looks_like_high_rms_short_wake_mishear(_normalize_local_asr_text(text))
+
+    assert not _is_safe_local_fallback_text("小白米")
+
+
+def test_high_rms_ability_request_mishear_is_narrow() -> None:
+    assert _looks_like_high_rms_ability_request_mishear(_normalize_local_asr_text("你進化回啦"))
+
+    for text in ("电视里有人问现在能做什么", "你进化了吗", "现在能做什么"):
+        assert not _looks_like_high_rms_ability_request_mishear(_normalize_local_asr_text(text))
+
+
 def test_open_local_fallback_accepts_addressed_questions() -> None:
     assert _is_safe_open_local_fallback_text("小白晴,用一句话简单回答你,今天最喜欢什么颜色,为什么?")
     assert (
@@ -142,7 +161,14 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
     assert _is_safe_open_local_fallback_text(
         "小白請不要在中間停頓的時候叉划,最後還需要說我聽明白了"
     )
+    assert _is_safe_open_local_fallback_text(
+        "小白請不要在中間評論的時候巧達最後需要說我聽你問了"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白請不要在中間停頓的時候搶答即使要說我聽你明白了"
+    )
     assert _is_safe_open_local_fallback_text("最後参划,最後只需要說我清明白了")
+    assert _is_safe_open_local_fallback_text("不要搶答等我結束之後再回")
     assert _is_safe_open_local_fallback_text(
         "小白一好 我想測試 讓據會不會被李中篤打斷請最後再說一句話"
     )
@@ -155,6 +181,31 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
     assert _is_safe_open_local_fallback_text(
         "小白你好,如果便是理有人说话,你应该的国家你之后再回答"
     )
+    assert _is_safe_open_local_fallback_text("小白你好如果聽到欠牌聲你不要接話")
+    assert _is_safe_open_local_fallback_text("小白你好旁边有视频生意你听到我叫小白再回答")
+    assert _is_safe_open_local_fallback_text("找你航米現代能做什麼請用一句話回答")
+
+
+def test_open_local_fallback_stores_addressed_test_prefix_without_replying() -> None:
+    prefix = "小白你好我想測試"
+    assert _looks_like_open_local_fallback_prefix_fragment(prefix)
+    assert not _is_safe_open_local_fallback_text(prefix)
+
+    combined = _combine_open_local_fallback_fragments(prefix, "不要搶答等我結束之後再回")
+    assert combined.startswith("小白你好我想测试")
+    assert _is_safe_open_local_fallback_text(combined)
+
+
+def test_open_local_fallback_combines_addressed_answer_prefix_with_semantic_suffix() -> None:
+    prefix = "小白你好情依句话回答你"
+    suffix = "不喜欢什么颜色为什么"
+    assert _looks_like_open_local_fallback_prefix_fragment(prefix)
+    assert not _is_safe_open_local_fallback_text(prefix)
+    assert not _is_safe_open_local_fallback_text(suffix)
+
+    combined = _combine_open_local_fallback_fragments(prefix, suffix)
+    assert combined.startswith("小白你好请一句话回答你")
+    assert _is_safe_open_local_fallback_text(combined)
 
 
 def test_open_local_fallback_combines_split_turn_completion_fragments() -> None:

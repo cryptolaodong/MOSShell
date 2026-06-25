@@ -188,6 +188,7 @@ def _normalize_local_asr_text(text: str) -> str:
         "個": "个",
         "樣": "样",
         "聽": "听",
+        "進": "进",
         "機": "机",
         "臺": "台",
         "來": "来",
@@ -206,6 +207,7 @@ def _normalize_local_asr_text(text: str) -> str:
         "號": "号",
         "魚": "鱼",
         "癢": "痒",
+        "依句": "一句",
     }
     for source, target in replacements.items():
         normalized = normalized.replace(source, target)
@@ -276,6 +278,21 @@ def _looks_like_rescuable_wake_second_pass(normalized: str) -> bool:
     if not normalized.startswith(("小", "想", "叫", "老")):
         return False
     return any(token in normalized for token in ("你好", "好", "号", "號"))
+
+
+def _looks_like_high_rms_short_wake_mishear(normalized: str) -> bool:
+    if not 2 <= len(normalized) <= 5:
+        return False
+    return normalized in {
+        "等待米好",
+        "小白米",
+        "小白猫",
+        "早掰你好",
+    }
+
+
+def _looks_like_high_rms_ability_request_mishear(normalized: str) -> bool:
+    return normalized in {"你进化回啦"}
 
 
 def _looks_like_rescuable_cloud_short_fragment(normalized: str) -> bool:
@@ -411,6 +428,7 @@ _OPEN_REQUEST_KEYWORDS = (
     "介绍",
     "应该",
     "如果",
+    "不要",
     "等我",
     "说完",
     "中间",
@@ -425,6 +443,7 @@ _OPEN_REQUEST_KEYWORDS = (
     "强答",
     "打断",
     "回复",
+    "接话",
 )
 _OPEN_REQUEST_SEMANTIC_KEYWORDS = (
     "为什么",
@@ -441,8 +460,12 @@ _OPEN_REQUEST_SEMANTIC_KEYWORDS = (
     "测试",
     "声音",
     "打字",
+    "键盘",
+    "欠牌",
     "电视",
+    "视频",
     "有人说话",
+    "接话",
     "抢答",
     "强答",
     "打断",
@@ -522,6 +545,10 @@ def _looks_like_turn_completion_request_fragment(normalized: str) -> bool:
         "听你来",
         "听你了",
         "听你来了",
+        "听你问",
+        "听你明白",
+        "需要说",
+        "再回",
     )
     return any(token in normalized for token in wait_tokens) and any(
         token in normalized for token in answer_tokens
@@ -532,8 +559,11 @@ def _canonicalize_open_local_fallback_text(text: str) -> str:
     cleaned = _clean_local_asr_text(text)
     normalized = _normalize_local_asr_text(cleaned)
     normalized = normalized.lstrip("嗯呃啊额噢哦喔…·.")
+    normalized = normalized.replace("情一句话", "请一句话")
     if not normalized:
         return ""
+    if normalized.startswith("找你航米"):
+        normalized = f"小白你好你{normalized[len('找你航米'):]}"
 
     for wake in _OPEN_REQUEST_WAKE_PREFIXES:
         if normalized.startswith(wake):
@@ -602,6 +632,12 @@ def _looks_like_open_local_fallback_prefix_fragment(text: str) -> bool:
         return False
     if _is_safe_open_local_fallback_text(normalized):
         return False
+    if (
+        normalized.startswith("小白")
+        and any(token in normalized for token in ("回答", "一句话", "请用"))
+        and not any(token in normalized for token in _OPEN_REQUEST_SEMANTIC_KEYWORDS)
+    ):
+        return True
     if not normalized.startswith(("小白", "请", "不要", "等我", "要说", "要說")):
         return False
     prefix_tokens = (
@@ -619,6 +655,7 @@ def _looks_like_open_local_fallback_prefix_fragment(text: str) -> bool:
         "差跨",
         "抢答",
         "强大",
+        "测试",
         "最后",
     )
     answer_tokens = (
@@ -1413,6 +1450,14 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._local_fallback_rescue_unsafe_short_max_chars = max(
             1,
             _int_env("MOSS_ASR_LOCAL_FALLBACK_RESCUE_UNSAFE_SHORT_MAX_CHARS", 5),
+        )
+        self._local_fallback_short_wake_mishear_min_rms = max(
+            0.0,
+            _float_env("MOSS_ASR_LOCAL_FALLBACK_SHORT_WAKE_MISHEAR_MIN_RMS", 2600.0),
+        )
+        self._local_fallback_short_wake_mishear_max_seconds = max(
+            0.1,
+            _float_env("MOSS_ASR_LOCAL_FALLBACK_SHORT_WAKE_MISHEAR_MAX_SECONDS", 3.0),
         )
         default_empty_wake_max_seconds = (
             self._local_fallback_trigger_max_seconds
@@ -3515,6 +3560,51 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     model=effective_model_name,
                 )
                 return open_text
+            if _looks_like_open_local_fallback_prefix_fragment(open_text) or (
+                self._pending_open_fallback_fragment and _looks_like_open_request_fragment(open_text)
+            ):
+                _latency_log(
+                    "asr_local_fallback_open_fragment",
+                    reason=reason,
+                    text_len=len(open_text),
+                    text_preview=open_text[:40],
+                    model=effective_model_name,
+                    pending=bool(self._pending_open_fallback_fragment),
+                )
+                return open_text
+        if text and not _is_safe_local_fallback_text(text):
+            normalized_text = _normalize_local_asr_text(text)
+            duration_seconds = len(flat) / sample_rate if sample_rate > 0 else 0.0
+            if (
+                _looks_like_high_rms_short_wake_mishear(normalized_text)
+                and max_rms >= self._local_fallback_short_wake_mishear_min_rms
+                and duration_seconds <= self._local_fallback_short_wake_mishear_max_seconds
+            ):
+                _latency_log(
+                    "asr_local_fallback_short_wake_mishear_accept",
+                    reason=reason,
+                    text_len=len(text),
+                    text_preview=text[:40],
+                    max_rms=round(max_rms, 1),
+                    duration=round(duration_seconds, 3),
+                    min_rms=round(self._local_fallback_short_wake_mishear_min_rms, 1),
+                )
+                text = "小白你好"
+            elif (
+                _looks_like_high_rms_ability_request_mishear(normalized_text)
+                and max_rms >= self._local_fallback_short_wake_mishear_min_rms
+                and duration_seconds <= self._local_fallback_short_wake_mishear_max_seconds + 2.0
+            ):
+                _latency_log(
+                    "asr_local_fallback_ability_mishear_accept",
+                    reason=reason,
+                    text_len=len(text),
+                    text_preview=text[:40],
+                    max_rms=round(max_rms, 1),
+                    duration=round(duration_seconds, 3),
+                    min_rms=round(self._local_fallback_short_wake_mishear_min_rms, 1),
+                )
+                text = "小白你现在能做什么"
         if text and not _is_safe_local_fallback_text(text):
             _remember_asr_rejected_text(text, reason=reason, max_rms=max_rms)
             _log_intent_drop_from_asr(
