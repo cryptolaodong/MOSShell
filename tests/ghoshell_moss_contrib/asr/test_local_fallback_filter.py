@@ -44,6 +44,9 @@ def test_safe_local_fallback_canonicalizes_wake_homophone() -> None:
     assert _canonicalize_safe_local_fallback_text("做完你好") == "小白你好"
     assert _canonicalize_safe_local_fallback_text("小白天啊") == "小白你好"
     assert _canonicalize_safe_local_fallback_text("希望拜你好") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("小蛋糕") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("小蛋一跑") == "小白你好"
+    assert _canonicalize_safe_local_fallback_text("早白一趟") == "小白你好"
     assert _canonicalize_safe_local_fallback_text("二个小白你好") == "小白你好"
 
 
@@ -71,6 +74,7 @@ def test_safe_local_fallback_rejects_likely_fragments() -> None:
     assert not _is_safe_local_fallback_text("小白你好小白你好")
     assert not _is_safe_local_fallback_text("小白你好小白你好小白你好小白你好")
     assert not _is_safe_local_fallback_text("你不在这儿怎么办一件事")
+    assert not _is_safe_local_fallback_text("小白你好 我想")
 
 
 def test_rescue_prompt_only_allows_wake_like_fragments() -> None:
@@ -139,6 +143,18 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
         "小白請不要在中間停頓的時候叉划,最後還需要說我聽明白了"
     )
     assert _is_safe_open_local_fallback_text("最後参划,最後只需要說我清明白了")
+    assert _is_safe_open_local_fallback_text(
+        "小白一好 我想測試 讓據會不會被李中篤打斷請最後再說一句話"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白你好,这是你条长俊测试,请不用强达,等我结束之后再回复"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白你好,我旁邊有打字聲音,你只需要回擋我身上了"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白你好,如果便是理有人说话,你应该的国家你之后再回答"
+    )
 
 
 def test_open_local_fallback_combines_split_turn_completion_fragments() -> None:
@@ -168,11 +184,24 @@ def test_open_local_fallback_combines_split_turn_completion_fragments() -> None:
     assert _is_safe_open_local_fallback_text(clipped_combined)
 
 
+def test_open_local_fallback_prefix_does_not_commit_as_short_wake() -> None:
+    prefix = "小白你好請等我把這句話全部輸"
+    assert _looks_like_open_local_fallback_prefix_fragment(prefix)
+    assert not _is_safe_open_local_fallback_text(prefix)
+    assert not _is_safe_local_fallback_text(prefix)
+
+
 def test_open_local_fallback_rejects_short_greeting_and_noise() -> None:
     assert not _is_safe_open_local_fallback_text("小白你好")
     assert not _is_safe_open_local_fallback_text("小怪你好")
     assert not _is_safe_open_local_fallback_text("背景声音测试")
+    assert not _is_safe_open_local_fallback_text("办公室打字声音测试")
+    assert not _is_safe_open_local_fallback_text("电视里面有人说今天最喜欢什么颜色为什么")
+    assert not _is_safe_open_local_fallback_text("如果电视里有人说话你应该之后再回答")
+    assert not _is_safe_open_local_fallback_text("旁边同事聊天说请用一句话回答")
+    assert not _is_safe_open_local_fallback_text("这是你条长俊测试请不用强达等我结束之后再回复")
     assert not _is_safe_open_local_fallback_text("小白请简单回答机器人")
     assert _looks_like_open_request_fragment("")
     assert _looks_like_open_request_fragment("请用一句话")
     assert not _looks_like_open_request_fragment("背景声音测试")
+    assert not _looks_like_open_request_fragment("办公室打字声音测试")

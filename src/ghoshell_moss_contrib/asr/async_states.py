@@ -161,6 +161,21 @@ def _normalize_local_asr_text(text: str) -> str:
         "簡": "简",
         "單": "单",
         "說": "说",
+        "測": "测",
+        "試": "试",
+        "斷": "断",
+        "擋": "答",
+        "條": "条",
+        "長": "长",
+        "結": "结",
+        "束": "束",
+        "復": "复",
+        "覆": "复",
+        "達": "答",
+        "讓": "让",
+        "據": "据",
+        "篤": "途",
+        "輸": "说",
         "時": "时",
         "話": "话",
         "為": "为",
@@ -183,6 +198,10 @@ def _normalize_local_asr_text(text: str) -> str:
         "強": "强",
         "妳": "你",
         "線": "线",
+        "邊": "边",
+        "聲": "声",
+        "應": "应",
+        "該": "该",
         "夠": "够",
         "號": "号",
         "魚": "鱼",
@@ -293,6 +312,9 @@ def _canonicalize_safe_local_fallback_text(text: str) -> str:
         "做完你好": "小白你好",
         "小白天啊": "小白你好",
         "希望拜你好": "小白你好",
+        "小蛋糕": "小白你好",
+        "小蛋一跑": "小白你好",
+        "早白一趟": "小白你好",
     }
     if normalized in exact_homophones:
         return exact_homophones[normalized]
@@ -332,6 +354,8 @@ def _is_safe_local_fallback_text(text: str) -> bool:
         return False
     if _looks_like_repeated_wake_hallucination(normalized):
         return False
+    if _looks_like_open_local_fallback_prefix_fragment(normalized):
+        return False
     exact_phrases = {
         "小白",
         "小白你好",
@@ -352,7 +376,6 @@ def _is_safe_local_fallback_text(text: str) -> bool:
         return any(
             token in normalized
             for token in (
-                "你好",
                 "在吗",
                 "在不在",
                 "哈喽",
@@ -386,6 +409,8 @@ _OPEN_REQUEST_KEYWORDS = (
     "能帮",
     "帮我",
     "介绍",
+    "应该",
+    "如果",
     "等我",
     "说完",
     "中间",
@@ -397,6 +422,9 @@ _OPEN_REQUEST_KEYWORDS = (
     "叉划",
     "参划",
     "抢答",
+    "强答",
+    "打断",
+    "回复",
 )
 _OPEN_REQUEST_SEMANTIC_KEYWORDS = (
     "为什么",
@@ -410,6 +438,15 @@ _OPEN_REQUEST_SEMANTIC_KEYWORDS = (
     "介绍",
     "耳朵",
     "北京",
+    "测试",
+    "声音",
+    "打字",
+    "电视",
+    "有人说话",
+    "抢答",
+    "强答",
+    "打断",
+    "回复",
 )
 _OPEN_REQUEST_PREFIX_ONLY = (
     "请用一句话",
@@ -464,12 +501,19 @@ def _looks_like_turn_completion_request_fragment(normalized: str) -> bool:
         "参划",
         "差跨",
         "抢答",
+        "强答",
         "强大",
+        "打断",
+        "最后",
+        "结束之后",
+        "结束后",
         "只需要",
     )
     answer_tokens = (
         "回答",
         "一句话",
+        "说一句话",
+        "回复",
         "听明白",
         "清明白",
         "新明白",
@@ -720,6 +764,12 @@ _RECENT_ASR_VOICE_ACTIVITY = {
     "last_loud_ts": 0.0,
     "rms": 0.0,
 }
+_RECENT_ASR_REJECTED_TEXT = {
+    "ts": 0.0,
+    "text": "",
+    "reason": "",
+    "max_rms": 0.0,
+}
 
 
 def _mark_asr_input_gate_open(timestamp: float, rms: float) -> None:
@@ -738,6 +788,103 @@ def _mark_asr_voice_activity(timestamp: float, rms: float) -> None:
 
 def recent_asr_voice_activity() -> dict[str, float]:
     return dict(_RECENT_ASR_VOICE_ACTIVITY)
+
+
+def _remember_asr_rejected_text(text: str, *, reason: str, max_rms: float) -> None:
+    _RECENT_ASR_REJECTED_TEXT["ts"] = time.time()
+    _RECENT_ASR_REJECTED_TEXT["text"] = str(text or "")[:120]
+    _RECENT_ASR_REJECTED_TEXT["reason"] = str(reason or "")[:80]
+    _RECENT_ASR_REJECTED_TEXT["max_rms"] = float(max_rms or 0.0)
+
+
+def recent_asr_rejected_text() -> dict[str, float | str]:
+    return dict(_RECENT_ASR_REJECTED_TEXT)
+
+
+def _input_impulse_features(
+    audio: np.ndarray,
+    *,
+    rms: float,
+    sample_rate: int,
+    gate_threshold: float,
+    subframe_seconds: float = 0.01,
+    active_rms_factor: float = 0.55,
+) -> dict[str, float]:
+    flat = np.asarray(audio).reshape(-1).astype(np.float32)
+    if len(flat) <= 0:
+        return {
+            "peak": 0.0,
+            "crest": 0.0,
+            "active_ratio": 0.0,
+            "zcr": 0.0,
+        }
+    peak = float(np.max(np.abs(flat)))
+    crest = peak / max(float(rms), 1.0)
+    if len(flat) > 1:
+        zcr = float(np.count_nonzero(np.signbit(flat[1:]) != np.signbit(flat[:-1])) / max(1, len(flat) - 1))
+    else:
+        zcr = 0.0
+    subframe = max(1, int(max(1, sample_rate) * max(0.001, subframe_seconds)))
+    sub_rms: list[float] = []
+    for start in range(0, len(flat), subframe):
+        chunk = flat[start : start + subframe]
+        if len(chunk) <= 0:
+            continue
+        sub_rms.append(float(np.sqrt(np.mean(chunk.astype(np.float64) ** 2))))
+    active_threshold = max(float(gate_threshold), float(rms) * max(0.0, active_rms_factor))
+    active_ratio = (
+        float(sum(1 for value in sub_rms if value >= active_threshold) / max(1, len(sub_rms)))
+        if sub_rms
+        else 0.0
+    )
+    return {
+        "peak": peak,
+        "crest": crest,
+        "active_ratio": active_ratio,
+        "zcr": zcr,
+    }
+
+
+def _looks_like_input_impulse_noise(
+    audio: np.ndarray,
+    *,
+    rms: float,
+    sample_rate: int,
+    gate_threshold: float,
+    min_rms: float,
+    min_peak: float,
+    min_crest: float,
+    max_active_ratio: float,
+    active_rms_factor: float,
+) -> tuple[bool, dict[str, float]]:
+    if rms < max(0.0, min_rms) or len(audio) <= 0:
+        return False, {}
+    features = _input_impulse_features(
+        audio,
+        rms=rms,
+        sample_rate=sample_rate,
+        gate_threshold=gate_threshold,
+        active_rms_factor=active_rms_factor,
+    )
+    impulse = (
+        features["peak"] >= max(0.0, min_peak)
+        and features["crest"] >= max(1.0, min_crest)
+        and features["active_ratio"] <= max(0.0, max_active_ratio)
+    )
+    return impulse, features
+
+
+def _input_gate_required_open_frames(
+    *,
+    rms: float,
+    base_open_frames: int,
+    fast_open_rms: float,
+    low_rms_open_frames: int,
+) -> int:
+    required = max(1, int(base_open_frames))
+    if fast_open_rms > 0 and rms < fast_open_rms:
+        required = max(required, int(low_rms_open_frames))
+    return required
 
 
 class AsyncAudioInputLoop:
@@ -1191,9 +1338,21 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._empty_retry_timeout_seconds = _float_env("MOSS_ASR_EMPTY_RETRY_TIMEOUT_SECONDS", 1.6)
         self._input_noise_gate_enabled = _bool_env("MOSS_ASR_INPUT_NOISE_GATE_ENABLED", True)
         self._input_gate_rms = _float_env("MOSS_ASR_INPUT_GATE_RMS", 450.0)
+        self._input_gate_low_rms = _float_env("MOSS_ASR_INPUT_GATE_LOW_RMS", self._input_gate_rms)
         self._input_gate_preroll_seconds = _float_env("MOSS_ASR_INPUT_GATE_PREROLL_SECONDS", 0.25)
         self._input_gate_tail_seconds = _float_env("MOSS_ASR_INPUT_GATE_TAIL_SECONDS", 0.55)
         self._input_gate_open_frames = max(1, _int_env("MOSS_ASR_INPUT_GATE_OPEN_FRAMES", 1))
+        self._input_gate_fast_open_rms = _float_env("MOSS_ASR_INPUT_GATE_FAST_OPEN_RMS", 0.0)
+        self._input_gate_low_rms_open_frames = max(
+            self._input_gate_open_frames,
+            _int_env("MOSS_ASR_INPUT_GATE_LOW_RMS_OPEN_FRAMES", self._input_gate_open_frames),
+        )
+        self._input_impulse_gate_enabled = _bool_env("MOSS_ASR_INPUT_IMPULSE_GATE_ENABLED", False)
+        self._input_impulse_min_rms = _float_env("MOSS_ASR_INPUT_IMPULSE_MIN_RMS", self._input_gate_rms)
+        self._input_impulse_min_peak = _float_env("MOSS_ASR_INPUT_IMPULSE_MIN_PEAK", 10000.0)
+        self._input_impulse_min_crest = _float_env("MOSS_ASR_INPUT_IMPULSE_MIN_CREST", 12.0)
+        self._input_impulse_max_active_ratio = _float_env("MOSS_ASR_INPUT_IMPULSE_MAX_ACTIVE_RATIO", 0.25)
+        self._input_impulse_active_rms_factor = _float_env("MOSS_ASR_INPUT_IMPULSE_ACTIVE_RMS_FACTOR", 0.55)
         self._no_text_cooldown_seconds = _float_env("MOSS_ASR_NO_TEXT_COOLDOWN_SECONDS", 0.0)
         self._no_text_cooldown_factor = max(1.0, _float_env("MOSS_ASR_NO_TEXT_COOLDOWN_FACTOR", 1.0))
         self._no_text_cooldown_max_seconds = _float_env(
@@ -1531,7 +1690,9 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 "speech_no_text_max=%.2fs speech_no_text_quiet=%.2fs "
                 "speech_no_text_action=%s hard=%.2fx empty_retry=%s retry_min_rms=%.1f "
                 "input_gate=%s gate_rms=%.1f gate_pre=%.2fs gate_tail=%.2fs "
-                "gate_open_frames=%d no_text_cooldown=%.2fs factor=%.2f max=%.2fs "
+                "gate_open_frames=%d fast_open_rms=%.1f low_rms=%.1f low_rms_frames=%d "
+                "impulse_gate=%s impulse_crest=%.1f impulse_active=%.2f "
+                "no_text_cooldown=%.2fs factor=%.2f max=%.2fs "
                 "local_fallback=%s local_model=%s local_min_rms=%.1f local_quiet=%.2fs drop_unsafe=%s "
                 "empty_wake=%s empty_wake_model=%s empty_wake_min_rms=%.1f "
                 "empty_wake_active=%.2fs..%.2fs "
@@ -1566,6 +1727,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._input_gate_preroll_seconds,
                 self._input_gate_tail_seconds,
                 self._input_gate_open_frames,
+                self._input_gate_fast_open_rms,
+                self._input_gate_low_rms,
+                self._input_gate_low_rms_open_frames,
+                self._input_impulse_gate_enabled,
+                self._input_impulse_min_crest,
+                self._input_impulse_max_active_ratio,
                 self._no_text_cooldown_seconds,
                 self._no_text_cooldown_factor,
                 self._no_text_cooldown_max_seconds,
@@ -1620,9 +1787,16 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 empty_retry_min_rms=self._empty_retry_min_rms,
                 input_gate=self._input_noise_gate_enabled,
                 input_gate_rms=self._input_gate_rms,
+                input_gate_low_rms=self._input_gate_low_rms,
                 input_gate_preroll=self._input_gate_preroll_seconds,
                 input_gate_tail=self._input_gate_tail_seconds,
                 input_gate_open_frames=self._input_gate_open_frames,
+                input_gate_fast_open_rms=self._input_gate_fast_open_rms,
+                input_gate_low_rms_open_frames=self._input_gate_low_rms_open_frames,
+                input_impulse_gate=self._input_impulse_gate_enabled,
+                input_impulse_min_peak=self._input_impulse_min_peak,
+                input_impulse_min_crest=self._input_impulse_min_crest,
+                input_impulse_max_active_ratio=self._input_impulse_max_active_ratio,
                 no_text_cooldown=self._no_text_cooldown_seconds,
                 no_text_cooldown_factor=self._no_text_cooldown_factor,
                 no_text_cooldown_max=self._no_text_cooldown_max_seconds,
@@ -2031,6 +2205,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         max_rms = 0.0
         speech_threshold = float(getattr(self._vad, "_speech_threshold", 600.0) or 600.0)
         gate_threshold = max(0.0, self._input_gate_rms)
+        low_gate_threshold = max(0.0, min(gate_threshold, self._input_gate_low_rms))
         activity_threshold = max(speech_threshold, gate_threshold) if self._input_noise_gate_enabled else speech_threshold
         frame_duration = float(getattr(self._recognizer, "frame_duration", 0.1) or 0.1)
         preroll_frames = max(1, int(self._input_gate_preroll_seconds / frame_duration))
@@ -2278,17 +2453,6 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     last_loud_age=last_loud_age,
                 )
                 return True
-            if fallback_text and _is_safe_local_fallback_text(fallback_text):
-                _NO_TEXT_FAILURE_COUNT = 0
-                self._pending_open_fallback_fragment = ""
-                self._pending_open_fallback_fragment_at = 0.0
-                await self._finish_with_local_fallback(
-                    _canonicalize_safe_local_fallback_text(fallback_text),
-                    reason="final_open_fallback",
-                    max_rms=max_rms,
-                    last_loud_age=last_loud_age,
-                )
-                return True
             if fallback_text and _looks_like_open_local_fallback_prefix_fragment(fallback_text):
                 self._pending_open_fallback_fragment = _canonicalize_open_local_fallback_text(fallback_text)
                 self._pending_open_fallback_fragment_at = time.time()
@@ -2301,6 +2465,17 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     max_rms=round(max_rms, 1),
                 )
                 return False
+            if fallback_text and _is_safe_local_fallback_text(fallback_text):
+                _NO_TEXT_FAILURE_COUNT = 0
+                self._pending_open_fallback_fragment = ""
+                self._pending_open_fallback_fragment_at = 0.0
+                await self._finish_with_local_fallback(
+                    _canonicalize_safe_local_fallback_text(fallback_text),
+                    reason="final_open_fallback",
+                    max_rms=max_rms,
+                    last_loud_age=last_loud_age,
+                )
+                return True
             _latency_log(
                 "asr_final_open_fallback_miss",
                 reason=reason,
@@ -2360,18 +2535,56 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 if self._input_noise_gate_enabled:
                     should_send_audio = False
                     preroll.append(audio_data)
-                    if rms >= gate_threshold:
+                    if rms >= low_gate_threshold:
+                        if self._input_impulse_gate_enabled and not input_gate_open:
+                            sample_rate = int(getattr(self._recognizer, "sample_rate", 16000) or 16000)
+                            impulse_noise, impulse_features = _looks_like_input_impulse_noise(
+                                audio_data,
+                                rms=rms,
+                                sample_rate=sample_rate,
+                                gate_threshold=low_gate_threshold,
+                                min_rms=self._input_impulse_min_rms,
+                                min_peak=self._input_impulse_min_peak,
+                                min_crest=self._input_impulse_min_crest,
+                                max_active_ratio=self._input_impulse_max_active_ratio,
+                                active_rms_factor=self._input_impulse_active_rms_factor,
+                            )
+                            if impulse_noise:
+                                input_gate_loud_frames = 0
+                                preroll.clear()
+                                _latency_log(
+                                    "asr_input_impulse_noise_drop",
+                                    rms=round(rms, 1),
+                                    threshold=round(low_gate_threshold, 1),
+                                    peak=round(impulse_features.get("peak", 0.0), 1),
+                                    crest=round(impulse_features.get("crest", 0.0), 3),
+                                    active_ratio=round(impulse_features.get("active_ratio", 0.0), 3),
+                                    zcr=round(impulse_features.get("zcr", 0.0), 4),
+                                )
+                                continue
+                        is_full_gate_frame = rms >= gate_threshold
                         input_gate_last_loud_time = last_audio_time
                         input_gate_loud_frames += 1
                         if not input_gate_open:
-                            if input_gate_loud_frames >= self._input_gate_open_frames:
+                            required_open_frames = _input_gate_required_open_frames(
+                                rms=rms,
+                                base_open_frames=self._input_gate_open_frames,
+                                fast_open_rms=self._input_gate_fast_open_rms,
+                                low_rms_open_frames=self._input_gate_low_rms_open_frames,
+                            )
+                            if not is_full_gate_frame:
+                                required_open_frames = max(required_open_frames, self._input_gate_low_rms_open_frames)
+                            if input_gate_loud_frames >= required_open_frames:
                                 input_gate_open = True
                                 _latency_log(
                                     "asr_input_gate_open",
                                     rms=round(rms, 1),
                                     threshold=round(gate_threshold, 1),
+                                    low_threshold=round(low_gate_threshold, 1),
+                                    fast_open_rms=round(self._input_gate_fast_open_rms, 1),
                                     preroll_frames=len(preroll),
                                     confirmed_frames=input_gate_loud_frames,
+                                    required_frames=required_open_frames,
                                 )
                                 _mark_asr_input_gate_open(last_audio_time, rms)
                                 if self._current_batch:
@@ -3279,6 +3492,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 )
                 return open_text
         if text and not _is_safe_local_fallback_text(text):
+            _remember_asr_rejected_text(text, reason=reason, max_rms=max_rms)
             _latency_log(
                 "asr_local_fallback_reject",
                 reason=reason,

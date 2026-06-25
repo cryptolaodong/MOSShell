@@ -6,6 +6,8 @@ import pytest
 
 import ghoshell_moss_contrib.asr.async_states as async_states
 from ghoshell_moss_contrib.asr.async_states import AsyncPdtListeningState
+from ghoshell_moss_contrib.asr.async_states import _input_gate_required_open_frames
+from ghoshell_moss_contrib.asr.async_states import _looks_like_input_impulse_noise
 from ghoshell_moss_contrib.asr.concepts.listener import Recognition
 
 
@@ -111,6 +113,70 @@ def test_empty_text_commit_policy_keeps_short_fast_and_long_patient(monkeypatch)
     assert state._empty_text_commit_policy("小白你好。") == (0.75, "punct", 0.25)
     assert state._empty_text_commit_policy("小白我现在要说一个比较长的问题") == (1.8, "long", 1.2)
     assert state._empty_text_commit_policy("小白我现在要说一个比较长的问题。") == (1.8, "long", 1.2)
+
+
+def test_input_impulse_gate_detects_keyboard_like_burst() -> None:
+    audio = np.zeros(1600, dtype=np.int16)
+    audio[320:324] = 30000
+    rms = float(np.sqrt(np.mean(audio.astype(float) ** 2)))
+
+    impulse, features = _looks_like_input_impulse_noise(
+        audio,
+        rms=rms,
+        sample_rate=16000,
+        gate_threshold=1200,
+        min_rms=1200,
+        min_peak=10000,
+        min_crest=12,
+        max_active_ratio=0.25,
+        active_rms_factor=0.55,
+    )
+
+    assert impulse
+    assert features["crest"] >= 12
+    assert features["active_ratio"] <= 0.25
+
+
+def test_input_impulse_gate_keeps_continuous_voice_like_audio() -> None:
+    t = np.arange(1600, dtype=np.float32) / 16000.0
+    audio = (3200.0 * np.sin(2 * np.pi * 220.0 * t)).astype(np.int16)
+    rms = float(np.sqrt(np.mean(audio.astype(float) ** 2)))
+
+    impulse, features = _looks_like_input_impulse_noise(
+        audio,
+        rms=rms,
+        sample_rate=16000,
+        gate_threshold=1200,
+        min_rms=1200,
+        min_peak=10000,
+        min_crest=12,
+        max_active_ratio=0.25,
+        active_rms_factor=0.55,
+    )
+
+    assert not impulse
+    assert features["active_ratio"] > 0.25
+
+
+def test_input_gate_requires_extra_confirmation_only_for_low_rms() -> None:
+    assert _input_gate_required_open_frames(
+        rms=1800,
+        base_open_frames=1,
+        fast_open_rms=2400,
+        low_rms_open_frames=2,
+    ) == 2
+    assert _input_gate_required_open_frames(
+        rms=2800,
+        base_open_frames=1,
+        fast_open_rms=2400,
+        low_rms_open_frames=2,
+    ) == 1
+    assert _input_gate_required_open_frames(
+        rms=1800,
+        base_open_frames=1,
+        fast_open_rms=0,
+        low_rms_open_frames=2,
+    ) == 1
 
 
 def test_incomplete_prefix_guard_waits_for_opening_fragment(monkeypatch) -> None:

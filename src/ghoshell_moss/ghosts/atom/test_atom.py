@@ -389,6 +389,18 @@ class TestAdapter:
         assert clipped_answer_kind == "turn_ack"
         assert clipped_answer_reply == "我听明白了。"
 
+        reachy_reply_kind, reachy_reply = _simple_fast_reply_with_kind(
+            "小白你好这是一个长距测试请不要强大等我接受再回覆"
+        )
+        assert reachy_reply_kind == "turn_ack"
+        assert reachy_reply == "我听明白了。"
+
+        interruption_probe_kind, interruption_probe_reply = _simple_fast_reply_with_kind(
+            "小白你好我想测试让女会会在中途打论请最后再说一句话"
+        )
+        assert interruption_probe_kind == "turn_ack"
+        assert interruption_probe_reply == "我听明白了。"
+
     def test_brief_voice_request_routes_to_brief_llm(self):
         from ._runtime import _brief_voice_request_kind
 

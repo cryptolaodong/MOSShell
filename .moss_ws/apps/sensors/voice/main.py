@@ -26,7 +26,10 @@ from ghoshell_moss_contrib.asr.async_concepts import (
     Recognition,
 )
 from ghoshell_moss_contrib.asr.async_listener_service import AsyncListenerServiceImpl
-from ghoshell_moss_contrib.asr.async_states import recent_asr_voice_activity
+from ghoshell_moss_contrib.asr.async_states import (
+    recent_asr_rejected_text,
+    recent_asr_voice_activity,
+)
 from ghoshell_moss_contrib.asr.configs import ListenerConfig
 from ghoshell_moss_contrib.asr.voice_turn_gate import (
     VoiceTurnDecision,
@@ -141,7 +144,18 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         # diagnostic-only, so uncertain audio cannot become a fake user turn.
         "MOSS_ASR_ENERGY_SPEECH_RMS": "1200",
         "MOSS_ASR_INPUT_GATE_RMS": "1200",
+        "MOSS_ASR_INPUT_GATE_LOW_RMS": "1100",
         "MOSS_ASR_INPUT_GATE_OPEN_FRAMES": "1",
+        "MOSS_ASR_INPUT_GATE_FAST_OPEN_RMS": "2400",
+        "MOSS_ASR_INPUT_GATE_LOW_RMS_OPEN_FRAMES": "3",
+        # Diagnostic impulse-gate knobs stay available, but remain disabled by
+        # default because the observed office noise is sustained low-RMS audio.
+        "MOSS_ASR_INPUT_IMPULSE_GATE_ENABLED": "0",
+        "MOSS_ASR_INPUT_IMPULSE_MIN_RMS": "1200",
+        "MOSS_ASR_INPUT_IMPULSE_MIN_PEAK": "8000",
+        "MOSS_ASR_INPUT_IMPULSE_MIN_CREST": "6",
+        "MOSS_ASR_INPUT_IMPULSE_MAX_ACTIVE_RATIO": "0.3",
+        "MOSS_ASR_INPUT_IMPULSE_ACTIVE_RMS_FACTOR": "0.55",
         "MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS": "5.5",
         "MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS": "1.25",
         "MOSS_ASR_SPEECH_NO_TEXT_HARD_MULTIPLIER": "1.6",
@@ -663,6 +677,56 @@ async def main(matrix: Matrix) -> None:
             )
         )
 
+    def _looks_like_prefix_greeting_blocking_fragment(text: str) -> bool:
+        normalized = (text or "").strip().lower()
+        normalized = normalized.strip(" \t\r\n，,。！？!?；;：:")
+        replacements = {
+            "這": "这",
+            "個": "个",
+            "句話": "句话",
+            "說": "说",
+            "聽": "听",
+            "後": "后",
+            "請": "请",
+            "搶": "抢",
+            "斷": "断",
+            "間": "间",
+            "復": "复",
+            "覆": "复",
+        }
+        for source, target in replacements.items():
+            normalized = normalized.replace(source, target)
+        normalized = normalized.replace(" ", "")
+        if not 4 <= len(normalized) <= 80:
+            return False
+        blocking_tokens = (
+            "等我",
+            "说完",
+            "收完",
+            "全部说",
+            "全部收",
+            "这句话",
+            "不要抢答",
+            "不要打断",
+            "中途",
+            "中间",
+            "最后",
+            "结束之后",
+            "结束后",
+        )
+        answer_tokens = (
+            "回答",
+            "回复",
+            "一句话",
+            "听明白",
+            "清明白",
+            "明白",
+        )
+        return any(token in normalized for token in blocking_tokens) or (
+            any(token in normalized for token in ("请", "再", "用"))
+            and any(token in normalized for token in answer_tokens)
+        )
+
     def _cancel_pending_prefix_greeting(reason: str, text: str, audio_max_rms: float) -> None:
         task = _pending_prefix_greeting.get("task")
         if isinstance(task, asyncio.Task) and not task.done():
@@ -828,6 +892,14 @@ async def main(matrix: Matrix) -> None:
                             return
                         if bool(_pending_prefix_greeting.get("saw_activity")):
                             activity_rms = float(_pending_prefix_greeting.get("activity_rms") or audio_max_rms)
+                            rejected = recent_asr_rejected_text()
+                            rejected_ts = float(rejected.get("ts") or 0.0)
+                            rejected_text = str(rejected.get("text") or "")
+                            rejected_after_hold = rejected_ts >= hold_started_epoch
+                            blocking_fragment = (
+                                rejected_after_hold
+                                and _looks_like_prefix_greeting_blocking_fragment(rejected_text)
+                            )
                             _pending_prefix_greeting.update(
                                 {
                                     "task": None,
@@ -839,18 +911,34 @@ async def main(matrix: Matrix) -> None:
                                     "activity_rms": 0.0,
                                 }
                             )
-                            _wake_recovery["until"] = _time.monotonic() + wake_recovery_seconds
-                            _wake_recovery["reason"] = "prefix_greeting_continuation_no_safe_text"
-                            _wake_recovery["rms"] = max(audio_max_rms, activity_rms)
+                            if blocking_fragment:
+                                _latency_log(
+                                    "voice_prefix_greeting_hold_drop_after_continuation_fragment",
+                                    hold_seconds=round(prefix_greeting_hold_seconds, 3),
+                                    max_hold_seconds=round(prefix_greeting_max_hold_seconds, 3),
+                                    text_preview=text[:40],
+                                    rejected_text_preview=rejected_text[:60],
+                                    rejected_reason=str(rejected.get("reason") or "")[:60],
+                                    activity_rms=round(activity_rms, 1),
+                                    audio_max_rms=round(audio_max_rms, 1),
+                                )
+                                _wake_recovery["until"] = _time.monotonic() + wake_recovery_seconds
+                                _wake_recovery["reason"] = "prefix_continuation_fragment"
+                                _wake_recovery["rms"] = max(activity_rms, audio_max_rms)
+                                return
+                            _released_prefix_greetings.add(release_key)
                             _latency_log(
-                                "voice_prefix_greeting_hold_drop_after_activity",
+                                "voice_prefix_greeting_hold_release_after_activity",
                                 hold_seconds=round(prefix_greeting_hold_seconds, 3),
                                 max_hold_seconds=round(prefix_greeting_max_hold_seconds, 3),
                                 text_preview=text[:40],
                                 audio_max_rms=round(audio_max_rms, 1),
                                 activity_rms=round(activity_rms, 1),
-                                recovery_seconds=round(wake_recovery_seconds, 3),
                             )
+                            try:
+                                await self.on_recognition(result)
+                            finally:
+                                _released_prefix_greetings.discard(release_key)
                             return
                         _pending_prefix_greeting.update(
                             {
