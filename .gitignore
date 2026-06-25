@@ -1,0 +1,13 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+*.log
+.venv/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.moss_ws/.env
+.env
+logs/
+tmp/
+screenlog.*

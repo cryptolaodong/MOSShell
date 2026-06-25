@@ -1,0 +1,17 @@
+[project]
+name = "xiaobai-1-0"
+version = "0.1.0"
+description = "小白 1.0 - 回合制 Reachy Mini 伴侣研究线"
+requires-python = ">=3.11"
+dependencies = [
+    "ghoshell-moss[host,ghost,zmq]>=0.1.0",
+    "pydantic-ai>=1.90.0",
+    "openai>=1.0.0",
+]
+
+[tool.uv.sources]
+ghoshell-moss = { path = "../MOSShell", editable = true }
+
+[tool.uv]
+# 让 uv 能找到 Reachy 项目里的 policy 模块
+# 通过 sys.path 在运行时添加
