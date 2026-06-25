@@ -41,6 +41,7 @@ from ghoshell_moss_contrib.asr.voice_turn_gate import (
 )
 from ghoshell_moss_contrib.moss_in_reachy_mini.audio.speaking_gate import (
     is_speaking as robot_is_speaking,
+    mark_user_turn as robot_mark_user_turn,
     mark_thinking as robot_mark_thinking,
     remaining_seconds as robot_speaking_remaining_seconds,
 )
@@ -161,6 +162,9 @@ def _apply_reachy_mic_asr_defaults(mic_backend_selected: str) -> None:
         "MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS": "1.25",
         "MOSS_ASR_SPEECH_NO_TEXT_HARD_MULTIPLIER": "1.6",
         "MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS": "3.2",
+        "MOSS_ASR_PRESPEECH_EXTEND_MIN_RMS": "1800",
+        "MOSS_ASR_PRESPEECH_EXTEND_SECONDS": "1.4",
+        "MOSS_ASR_PRESPEECH_EXTEND_MAX_TIMES": "1",
         "MOSS_ASR_INPUT_GATE_PREROLL_SECONDS": "2.0",
         "MOSS_ASR_INPUT_GATE_TAIL_SECONDS": "1.2",
         "MOSS_VOICE_SAVE_EMPTY_ASR_AUDIO": "0",
@@ -1192,6 +1196,7 @@ async def main(matrix: Matrix) -> None:
                     robot_mark_thinking()
                     if sound_cue_on_thinking:
                         _play_sound_cue("thinking", reason="voice_final_before_send")
+                    user_turn_at = robot_mark_user_turn()
                     matrix.session.add_input_signal(
                         text,
                         description=f"voice: {text[:50]}",
@@ -1215,6 +1220,7 @@ async def main(matrix: Matrix) -> None:
                         addressed=gate_decision.addressed,
                         active_before=gate_decision.active_before,
                         active_left_seconds=gate_decision.active_left_seconds,
+                        user_turn_at=round(user_turn_at, 6),
                     )
                     _dedup["text"] = text
                     _dedup["ts"] = now

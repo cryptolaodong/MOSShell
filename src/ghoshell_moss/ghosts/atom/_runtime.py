@@ -95,11 +95,15 @@ _FAST_NOISE_CONTEXT_WORDS = (
     "键盘",
     "电视",
     "视频",
+    "办公室",
     "旁边",
     "别人",
     "其他人",
+    "有人",
     "有人说话",
     "聊天",
+    "声音",
+    "声",
     "背景",
     "杂音",
     "噪声",
@@ -245,9 +249,14 @@ _FAST_TEXT_REPLACEMENTS = {
     "写单": "简单",
     "解答": "简单",
     "请请回答": "请简短回答",
+    "请你去还回答": "请用一句话回答",
     "回来": "回答",
     "回家": "回答",
     "回覆": "回复",
+    "們": "们",
+    "天使里": "电视里",
+    "说换": "说话",
+    "降你": "叫你",
     "接受": "结束",
     "强大": "抢答",
     "打论": "打断",
@@ -289,6 +298,7 @@ _FAST_TEXT_REPLACEMENTS = {
     "这位金": "觉得北京",
     "这不成是": "这个城市",
     "緊用": "请用",
+    "緊描": "请不要",
     "換": "换",
     "堂俊子": "长句子",
     "长去子": "长句子",
@@ -301,6 +311,9 @@ _FAST_TEXT_REPLACEMENTS = {
     "搶打答": "抢答",
     "抢打挡": "抢答",
     "抢打答": "抢答",
+    "跳答": "抢答",
+    "停分": "停顿",
+    "要天理": "聊天",
 }
 
 
@@ -368,10 +381,41 @@ def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
         return "turn_ack", os.environ.get("MOSS_FAST_TURN_ACK_REPLY", "我听明白了。")
     if (
         len(normalized) <= 90
+        and "不要在中间" in normalized
+        and any(marker in normalized for marker in ("抢答", "插话"))
+    ):
+        return "turn_ack", os.environ.get("MOSS_FAST_TURN_ACK_REPLY", "我听明白了。")
+    if (
+        len(normalized) <= 90
         and any(guard in normalized for guard in _FAST_TURN_ACK_GUARDS)
         and any(marker in normalized for marker in _FAST_TURN_ACK_REQUEST_MARKERS)
     ):
         return "turn_ack", os.environ.get("MOSS_FAST_TURN_ACK_REPLY", "我听明白了。")
+    if (
+        len(normalized) <= 90
+        and "小白" in normalized
+        and (
+            "不要接话" in normalized
+            or "别接话" in normalized
+            or "不用回复" in normalized
+            or "不要回复" in normalized
+            or "只回复我" in normalized
+        )
+    ):
+        return "noise_instruction", os.environ.get("MOSS_FAST_NOISE_ACK_REPLY", "我知道了。")
+    if (
+        len(normalized) <= 90
+        and "小白" in normalized
+        and (
+            "等我叫" in normalized
+            or "叫小白再回答" in normalized
+            or "叫你之后再回答" in normalized
+        )
+    ):
+        return "noise_instruction", os.environ.get(
+            "MOSS_FAST_NOISE_WAIT_REPLY",
+            "好的，没叫我我就不接话。",
+        )
     if (
         len(normalized) <= 90
         and "小白" in normalized

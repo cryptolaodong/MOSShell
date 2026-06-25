@@ -425,6 +425,18 @@ class TestAdapter:
         assert reachy_live_pause_2_kind == "turn_ack"
         assert reachy_live_pause_2_reply == "我听明白了。"
 
+        reachy_clipped_pause_kind, reachy_clipped_pause_reply = _simple_fast_reply_with_kind(
+            "小白请不要在中间評論的时候抢答"
+        )
+        assert reachy_clipped_pause_kind == "turn_ack"
+        assert reachy_clipped_pause_reply == "我听明白了。"
+
+        reachy_live_pause_3_kind, reachy_live_pause_3_reply = _simple_fast_reply_with_kind(
+            "小白緊描在中间停分的时候跳答最后是需要说我听你了"
+        )
+        assert reachy_live_pause_3_kind == "turn_ack"
+        assert reachy_live_pause_3_reply == "我听明白了。"
+
         reachy_live_wait_kind, reachy_live_wait_reply = _simple_fast_reply_with_kind(
             "小白你好这是一个場具此事请不要想打答我结束之后再回复"
         )
@@ -451,6 +463,24 @@ class TestAdapter:
         )
         assert tv_kind == "noise_instruction"
         assert tv_reply == "好的，没叫我我就不接话。"
+
+        live_tv_kind, live_tv_reply = _simple_fast_reply_with_kind(
+            "小白你好如果天使里有人说换你应该等我降你之后再回答"
+        )
+        assert live_tv_kind == "noise_instruction"
+        assert live_tv_reply == "好的，没叫我我就不接话。"
+
+        office_kind, office_reply = _simple_fast_reply_with_kind(
+            "小白你好辦公室有人要天理不用回复他們只回复我"
+        )
+        assert office_kind == "noise_instruction"
+        assert office_reply == "我知道了。"
+
+        no_interrupt_kind, no_interrupt_reply = _simple_fast_reply_with_kind(
+            "小白朝若和那前还是你不要接话"
+        )
+        assert no_interrupt_kind == "noise_instruction"
+        assert no_interrupt_reply == "我知道了。"
 
         background_kind, background_reply = _simple_fast_reply_with_kind(
             "电视里有人说话你应该等我叫你之后再回答"
@@ -554,6 +584,12 @@ class TestAdapter:
 
         kind, reply = _simple_fast_reply_with_kind(
             "小白请丁秘去换简单回答你今天最喜欢手机的字会什么"
+        )
+        assert kind == "brief_color"
+        assert reply == "我喜欢蓝色，因为它像天空一样安静又可靠。"
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白你好请你去还回答你今天最喜欢什么颜色为什么"
         )
         assert kind == "brief_color"
         assert reply == "我喜欢蓝色，因为它像天空一样安静又可靠。"

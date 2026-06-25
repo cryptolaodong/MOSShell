@@ -36,7 +36,13 @@ from reachy_mini.io.protocol import (
     PlayUploadedAudioCmd,
     CancelAudioCmd,
 )
-from .speaking_gate import clear_speaking, clear_speech_pending, mark_speech_pending, mark_speaking_for
+from .speaking_gate import (
+    clear_speaking,
+    clear_speech_pending,
+    latest_user_turn_at,
+    mark_speech_pending,
+    mark_speaking_for,
+)
 
 __all__ = ["ReachyMiniUploadAudioPlayer"]
 
@@ -144,6 +150,8 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         self._current_upload_id: Optional[str] = None
         self._played_segment_count = 0
         self._pending_started_at = 0.0
+        self._pending_started_wall_at = 0.0
+        self._pending_user_turn_at = 0.0
         self._first_audio_logged = False
 
         self._worker_thread: Optional[threading.Thread] = None
@@ -190,6 +198,8 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         self._next_play_monotonic = time.monotonic()
         self._played_segment_count = 0
         self._pending_started_at = 0.0
+        self._pending_started_wall_at = 0.0
+        self._pending_user_turn_at = 0.0
         self._first_audio_logged = False
         self._play_done_event.set()
         self.logger.info("%s cleared", self._log_prefix)
@@ -300,9 +310,16 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
 
     def mark_pending(self) -> None:
         self._pending_started_at = time.monotonic()
+        self._pending_started_wall_at = time.time()
+        self._pending_user_turn_at = latest_user_turn_at()
         self._first_audio_logged = False
         mark_speech_pending()
-        self.logger.info("%s speech pending", self._log_prefix)
+        user_turn_age = (
+            self._pending_started_wall_at - self._pending_user_turn_at
+            if self._pending_user_turn_at
+            else 0.0
+        )
+        self.logger.info("%s speech pending user_turn_age=%.2fs", self._log_prefix, user_turn_age)
 
     def on_play(self, callback) -> None:
         pass
@@ -332,6 +349,38 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
         if not frames:
             return 0.0
         return sum(len(frame) for frame in frames) / float(self.sample_rate)
+
+    def _stale_response_status(self) -> tuple[bool, str, dict[str, float]]:
+        if not _env_enabled("MOSS_REACHY_UPLOAD_DROP_STALE_RESPONSE", "1"):
+            return False, "", {}
+        now = time.time()
+        latest_turn = latest_user_turn_at()
+        max_age = _env_float("MOSS_REACHY_UPLOAD_MAX_RESPONSE_AGE_SECONDS", 5.0)
+        new_turn_grace = _env_float("MOSS_REACHY_UPLOAD_NEW_TURN_GRACE_SECONDS", 0.15)
+        tracking_window = _env_float("MOSS_REACHY_UPLOAD_STALE_TRACKING_WINDOW_SECONDS", 20.0)
+        pending_wall = self._pending_started_wall_at or now
+        pending_turn = self._pending_user_turn_at
+        if pending_turn and tracking_window > 0 and pending_wall - pending_turn > tracking_window:
+            return False, "", {
+                "latest_user_turn_at": round(latest_turn, 6),
+                "pending_started_wall_at": round(pending_wall, 6),
+                "pending_user_turn_at": round(pending_turn, 6),
+                "tracking_window": round(tracking_window, 3),
+            }
+        fields = {
+            "latest_user_turn_at": round(latest_turn, 6),
+            "pending_started_wall_at": round(pending_wall, 6),
+            "pending_user_turn_at": round(pending_turn, 6),
+            "age_since_pending_turn": round(now - pending_turn, 3) if pending_turn else 0.0,
+            "latest_after_pending": round(latest_turn - pending_wall, 3) if latest_turn else 0.0,
+            "max_age": round(max_age, 3),
+            "tracking_window": round(tracking_window, 3),
+        }
+        if latest_turn and latest_turn > pending_wall + new_turn_grace:
+            return True, "new_user_turn_after_tts_pending", fields
+        if pending_turn and max_age > 0 and now - pending_turn > max_age:
+            return True, "response_too_old_for_user_turn", fields
+        return False, "", fields
 
     def _worker_loop(self) -> None:
         pending_frames: list[np.ndarray] = []
@@ -439,6 +488,19 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                 self._play_done_event.set()
                 return
 
+            stale, stale_reason, stale_fields = self._stale_response_status()
+            if stale:
+                clear_speech_pending()
+                self.logger.warning(
+                    "%s [ReachyLatency] tts_stale_drop reason=%s generation=%d fields=%s",
+                    self._log_prefix,
+                    stale_reason,
+                    generation,
+                    stale_fields,
+                )
+                self._play_done_event.set()
+                return
+
             all_audio = self._apply_gain(all_audio)
 
             # Encode as WAV
@@ -465,6 +527,18 @@ class ReachyMiniUploadAudioPlayer(StreamAudioPlayer):
                             return
                         time.sleep(min(0.05, self._next_play_monotonic - time.monotonic()))
                     if generation != self._generation:
+                        return
+                    stale, stale_reason, stale_fields = self._stale_response_status()
+                    if stale:
+                        clear_speech_pending()
+                        self.logger.warning(
+                            "%s [ReachyLatency] tts_stale_drop_before_play reason=%s generation=%d fields=%s",
+                            self._log_prefix,
+                            stale_reason,
+                            generation,
+                            stale_fields,
+                        )
+                        self._play_done_event.set()
                         return
                     self._ensure_motors_ready(reason="before_play")
                     self._log_output_health(reason="before_play")

@@ -10,6 +10,7 @@ from ghoshell_moss_contrib.asr.async_states import (
     _looks_like_open_request_fragment,
     _looks_like_rescuable_wake_second_pass,
     _looks_like_rescuable_short_wake_fragment,
+    _looks_like_wake_conditioned_open_fragment,
     _normalize_local_asr_text,
 )
 
@@ -173,6 +174,7 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
     assert _is_safe_open_local_fallback_text(
         "小白請不要在中間停頓的時候搶答即使要說我聽你明白了"
     )
+    assert _is_safe_open_local_fallback_text("小白請不要在中間評論的時候搶答")
     assert _is_safe_open_local_fallback_text("最後参划,最後只需要說我清明白了")
     assert _is_safe_open_local_fallback_text("不要搶答等我結束之後再回")
     assert _is_safe_open_local_fallback_text(
@@ -182,13 +184,108 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
         "小白你好,这是你条长俊测试,请不用强达,等我结束之后再回复"
     )
     assert _is_safe_open_local_fallback_text(
+        "想玩一好這是一個場具,測試請不要搶答的諾結束之後再回覆"
+    )
+    assert _canonicalize_open_local_fallback_text(
+        "想玩一好這是一個場具,測試請不要搶答的諾結束之後再回覆"
+    ).startswith("小白你好")
+    assert _is_safe_open_local_fallback_text(
         "小白你好,我旁邊有打字聲音,你只需要回擋我身上了"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白你好我旁边有打自身一地只需要没打我知道了"
+    )
+    assert (
+        _canonicalize_open_local_fallback_text(
+            "小白你好我旁边有打自身一地只需要没打我知道了"
+        )
+        == "小白你好我旁边有打字声音你只需要回答我知道了"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "搶白你好辦公室有人聊天你不用回覆他們只回覆啊"
+    )
+    assert (
+        _canonicalize_open_local_fallback_text(
+            "搶白你好辦公室有人聊天你不用回覆他們只回覆啊"
+        )
+        == "小白你好办公室有人聊天你不用回复他们只回复啊"
     )
     assert _is_safe_open_local_fallback_text(
         "小白你好,如果便是理有人说话,你应该的国家你之后再回答"
     )
+    assert _is_safe_open_local_fallback_text(
+        "搅拌你好入火电视里,有人说换你应该等我去之后再回答"
+    )
+    assert (
+        _canonicalize_open_local_fallback_text(
+            "搅拌你好入火电视里,有人说换你应该等我去之后再回答"
+        )
+        == "小白你好如果电视里有人说话你应该等我去之后再回答"
+    )
     assert _is_safe_open_local_fallback_text("小白你好如果聽到欠牌聲你不要接話")
+    assert _is_safe_open_local_fallback_text("小白你好如果聽到鍵牌聲你不要見話")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好如果聽到鍵牌聲你不要見話")
+        == "小白你好如果听到键盘声你不要接话"
+    )
+    assert _is_safe_open_local_fallback_text("小白你好如果聽到鍵盤聲你不要經話")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好如果聽到鍵盤聲你不要經話")
+        == "小白你好如果听到键盘声你不要接话"
+    )
+    assert _is_safe_open_local_fallback_text("小白你好如果听到劝盘生理妙奸化")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好如果听到劝盘生理妙奸化")
+        == "小白你好如果听到键盘声你不要接话"
+    )
+    assert _is_safe_open_local_fallback_text("小白你好如果听到电台是你不要经话")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好如果听到电台是你不要经话")
+        == "小白你好如果听到键盘声你不要接话"
+    )
+    assert _is_safe_open_local_fallback_text("想白你好如果听到剑牌生你不要电话")
+    assert (
+        _canonicalize_open_local_fallback_text("想白你好如果听到剑牌生你不要电话")
+        == "小白你好如果听到键盘声你不要接话"
+    )
+    assert _is_safe_open_local_fallback_text("小白你好如果听到戒完事你不要计划")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好如果听到戒完事你不要计划")
+        == "小白你好如果听到键盘声你不要接话"
+    )
+    assert _is_safe_open_local_fallback_text("小白你好如果听到近牌声你不要计划")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好如果听到近牌声你不要计划")
+        == "小白你好如果听到键盘声你不要接话"
+    )
+    assert _is_safe_open_local_fallback_text("小白你好如果聽到近排聲你不要計畫")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好如果聽到近排聲你不要計畫")
+        == "小白你好如果听到键盘声你不要接话"
+    )
     assert _is_safe_open_local_fallback_text("小白你好旁边有视频生意你听到我叫小白再回答")
+    assert _is_safe_open_local_fallback_text("小白你好旁边有着平身你听看我叫小白再回答")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好旁边有着平身你听看我叫小白再回答")
+        == "小白你好旁边有视频声音你听到我叫小白再回答"
+    )
+    assert _is_safe_open_local_fallback_text("小白你好旁边有时评论你听到我叫小白再回答")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好旁边有时评论你听到我叫小白再回答")
+        == "小白你好旁边有视频声音你听到我叫小白再回答"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白你好朋友我是平时姨女听到我叫小白再回答"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白你好朋友我是平时姨女听到我叫小白在回答"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "小白你好旁边有视频是你听到我这样小白在地打"
+    )
+    assert "叫小白再回答" in _canonicalize_open_local_fallback_text(
+        "小白你好朋友我是平时姨女听到我叫小白在回答"
+    )
     assert _is_safe_open_local_fallback_text("找你航米現代能做什麼請用一句話回答")
     assert (
         _canonicalize_open_local_fallback_text("小白你好如何聽到這")
@@ -212,9 +309,27 @@ def test_open_local_fallback_stores_addressed_test_prefix_without_replying() -> 
     assert _looks_like_open_local_fallback_prefix_fragment(prefix)
     assert not _is_safe_open_local_fallback_text(prefix)
 
+    noise_context_prefix = "小白你好旁边有视频声音"
+    assert _looks_like_open_local_fallback_prefix_fragment(noise_context_prefix)
+    assert not _is_safe_open_local_fallback_text(noise_context_prefix)
+    vague_noise_context_prefix = "小白你好旁边有什么"
+    assert _looks_like_open_local_fallback_prefix_fragment(vague_noise_context_prefix)
+    assert not _is_safe_open_local_fallback_text(vague_noise_context_prefix)
+
     combined = _combine_open_local_fallback_fragments(prefix, "不要搶答等我結束之後再回")
     assert combined.startswith("小白你好我想测试")
     assert _is_safe_open_local_fallback_text(combined)
+
+
+def test_wake_conditioned_buffer_only_stores_addressed_incomplete_requests() -> None:
+    assert _looks_like_wake_conditioned_open_fragment("小白你好你現在的字")
+    assert _looks_like_wake_conditioned_open_fragment("小白你好请用一")
+    assert _looks_like_wake_conditioned_open_fragment("想白你好旁边有什么")
+
+    assert not _looks_like_wake_conditioned_open_fragment("电视里小白你好你現在的字")
+    assert not _looks_like_wake_conditioned_open_fragment("小明你好你现在能做什么")
+    assert not _looks_like_wake_conditioned_open_fragment("小白你好")
+    assert not _looks_like_wake_conditioned_open_fragment("小白你好你现在能做什么")
 
 
 def test_open_local_fallback_combines_addressed_answer_prefix_with_semantic_suffix() -> None:

@@ -197,6 +197,8 @@ def _normalize_local_asr_text(text: str) -> str:
         "滾": "滚",
         "還": "还",
         "強": "强",
+        "搶": "抢",
+        "評": "评",
         "妳": "你",
         "線": "线",
         "邊": "边",
@@ -434,6 +436,7 @@ _OPEN_REQUEST_KEYWORDS = (
     "介绍",
     "应该",
     "如果",
+    "听到",
     "不要",
     "等我",
     "说完",
@@ -449,6 +452,9 @@ _OPEN_REQUEST_KEYWORDS = (
     "强答",
     "打断",
     "回复",
+    "叫小白再回答",
+    "听到我叫小白",
+    "再回答",
     "接话",
 )
 _OPEN_REQUEST_SEMANTIC_KEYWORDS = (
@@ -476,6 +482,8 @@ _OPEN_REQUEST_SEMANTIC_KEYWORDS = (
     "强答",
     "打断",
     "回复",
+    "叫小白再回答",
+    "听到我叫小白",
 )
 _OPEN_REQUEST_PREFIX_ONLY = (
     "请用一句话",
@@ -500,6 +508,8 @@ _OPEN_REQUEST_WAKE_PREFIXES = (
     "小怪",
     "角白",
     "走啊",
+    "抢白",
+    "搶白",
 )
 
 
@@ -557,6 +567,8 @@ def _looks_like_turn_completion_request_fragment(normalized: str) -> bool:
         "听你明白",
         "需要说",
         "再回",
+        "抢答",
+        "强答",
     )
     return any(token in normalized for token in wait_tokens) and any(
         token in normalized for token in answer_tokens
@@ -572,8 +584,39 @@ def _canonicalize_open_local_fallback_text(text: str) -> str:
         return ""
     if normalized.startswith("找你航米"):
         normalized = f"小白你好你{normalized[len('找你航米'):]}"
+    if normalized.startswith("想玩一好"):
+        normalized = f"小白你好{normalized[len('想玩一好'):]}"
+    if normalized.startswith("搅拌你好入火"):
+        normalized = f"小白你好如果{normalized[len('搅拌你好入火'):]}"
+    normalized = normalized.replace("说换", "说话")
+    normalized = normalized.replace("辦公室", "办公室").replace("他們", "他们")
+    if normalized.startswith("小白你好我旁边有打自身"):
+        normalized = "小白你好我旁边有打字声音你只需要回答我知道了"
+    if normalized.startswith(
+        (
+            "小白你好如果听到剑牌",
+            "想白你好如果听到剑牌",
+            "小白你好如果听到戒完",
+        )
+    ):
+        normalized = "小白你好如果听到键盘声你不要接话"
+    if normalized.startswith(("小白你好如果听到劝盘", "小白你好如果聽到勸盤")):
+        normalized = "小白你好如果听到键盘声你不要接话"
+    if normalized.startswith("小白你好如果听到电台"):
+        normalized = "小白你好如果听到键盘声你不要接话"
     if normalized.startswith(("小白你好如何听到这", "小白你好如果听到这")):
         normalized = "小白你好如果听到键盘声你不要接话"
+    if normalized.startswith("小白"):
+        normalized = normalized.replace("鍵盤", "键盘").replace("鍵牌", "键盘").replace("欠牌", "键盘")
+        normalized = normalized.replace("剑牌", "键盘").replace("劝盘", "键盘")
+        normalized = normalized.replace("近牌", "键盘").replace("近排", "键盘")
+        normalized = normalized.replace("經話", "接话").replace("見話", "接话")
+        normalized = normalized.replace("經话", "接话").replace("見话", "接话")
+        normalized = normalized.replace("不要电话", "不要接话")
+        normalized = normalized.replace("不要计划", "不要接话").replace("不要計畫", "不要接话")
+        normalized = normalized.replace("叫小白在回答", "叫小白再回答")
+        normalized = normalized.replace("着平身", "视频声音").replace("聽看", "听到").replace("听看", "听到")
+        normalized = normalized.replace("有时评论", "有视频声音").replace("有时评輪", "有视频声音")
 
     for wake in _OPEN_REQUEST_WAKE_PREFIXES:
         if normalized.startswith(wake):
@@ -648,6 +691,25 @@ def _looks_like_open_local_fallback_prefix_fragment(text: str) -> bool:
         and not any(token in normalized for token in _OPEN_REQUEST_SEMANTIC_KEYWORDS)
     ):
         return True
+    if (
+        normalized.startswith("小白")
+        and any(
+            token in normalized
+            for token in (
+                "打字",
+                "键盘",
+                "电视",
+                "视频",
+                "声音",
+                "办公室",
+                "旁边",
+                "有人说话",
+                "聊天",
+            )
+        )
+        and not any(token in normalized for token in _OPEN_REQUEST_KEYWORDS)
+    ):
+        return True
     if not normalized.startswith(("小白", "请", "不要", "等我", "要说", "要說")):
         return False
     prefix_tokens = (
@@ -684,6 +746,35 @@ def _looks_like_open_local_fallback_prefix_fragment(text: str) -> bool:
     return any(token in normalized for token in prefix_tokens) and not any(
         token in normalized for token in answer_tokens
     )
+
+
+def _looks_like_wake_conditioned_open_fragment(text: str) -> bool:
+    normalized = _normalize_local_asr_text(_canonicalize_open_local_fallback_text(text))
+    if not 5 <= len(normalized) <= 36:
+        return False
+    if not normalized.startswith(("小白", "想白", "想把", "小拜", "小百", "小板")):
+        return False
+    if _is_safe_local_fallback_text(normalized) or _is_safe_open_local_fallback_text(normalized):
+        return False
+    requestish_tokens = (
+        "你现在",
+        "現在",
+        "能做",
+        "能帮",
+        "做什么",
+        "一句话",
+        "回答",
+        "请用",
+        "请",
+        "等我",
+        "说完",
+        "不要",
+        "中间",
+        "抢答",
+        "旁边",
+        "听到",
+    )
+    return any(token in normalized for token in requestish_tokens)
 
 
 def _combine_open_local_fallback_fragments(previous: str, current: str) -> str:
@@ -1395,6 +1486,9 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
             os.environ.get("MOSS_VOICE_ADDRESS_WORDS", "小白,蒋白"),
         )
         self._prespeech_batch_max_seconds = _float_env("MOSS_ASR_PRESPEECH_BATCH_MAX_SECONDS", 3.0)
+        self._prespeech_extend_min_rms = _float_env("MOSS_ASR_PRESPEECH_EXTEND_MIN_RMS", 0.0)
+        self._prespeech_extend_seconds = _float_env("MOSS_ASR_PRESPEECH_EXTEND_SECONDS", 0.0)
+        self._prespeech_extend_max_times = max(0, _int_env("MOSS_ASR_PRESPEECH_EXTEND_MAX_TIMES", 0))
         self._speech_no_text_max_seconds = _float_env("MOSS_ASR_SPEECH_NO_TEXT_MAX_SECONDS", 5.5)
         self._speech_no_text_min_quiet_seconds = _float_env("MOSS_ASR_SPEECH_NO_TEXT_MIN_QUIET_SECONDS", 0.65)
         self._speech_no_text_hard_multiplier = _float_env("MOSS_ASR_SPEECH_NO_TEXT_HARD_MULTIPLIER", 1.35)
@@ -1568,6 +1662,18 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         self._open_fallback_fragment_ttl_seconds = _float_env(
             "MOSS_ASR_OPEN_FALLBACK_FRAGMENT_TTL_SECONDS",
             12.0,
+        )
+        self._wake_conditioned_buffer_enabled = _bool_env(
+            "MOSS_ASR_WAKE_CONDITIONED_BUFFER_ENABLED",
+            True,
+        )
+        self._wake_conditioned_buffer_max_seconds = _float_env(
+            "MOSS_ASR_WAKE_CONDITIONED_BUFFER_MAX_SECONDS",
+            3.2,
+        )
+        self._wake_conditioned_buffer_min_quiet_seconds = _float_env(
+            "MOSS_ASR_WAKE_CONDITIONED_BUFFER_MIN_QUIET_SECONDS",
+            1.05,
         )
         self._pending_open_fallback_fragment = ""
         self._pending_open_fallback_fragment_at = 0.0
@@ -1761,6 +1867,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 "short_max=%d punct=%.2fs empty=%.2fs long_empty=%.2fs audio_idle=%.2fs final_wait=%.2fs "
                 "empty_final_wait=%.2fs server_vad=%dms stable_quiet=%.2fs "
                 "punct_quiet=%.2fs short_quiet=%.2fs long_empty_quiet=%.2fs prespeech_max=%.2fs "
+                "prespeech_extend=%.2fs@%.1f x%d "
                 "speech_no_text_max=%.2fs speech_no_text_quiet=%.2fs "
                 "speech_no_text_action=%s hard=%.2fx empty_retry=%s retry_min_rms=%.1f "
                 "input_gate=%s gate_rms=%.1f gate_pre=%.2fs gate_tail=%.2fs "
@@ -1790,6 +1897,9 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 self._stable_short_min_quiet_seconds,
                 self._long_empty_text_min_quiet_seconds,
                 self._prespeech_batch_max_seconds,
+                self._prespeech_extend_seconds,
+                self._prespeech_extend_min_rms,
+                self._prespeech_extend_max_times,
                 self._speech_no_text_max_seconds,
                 self._speech_no_text_min_quiet_seconds,
                 self._speech_no_text_action,
@@ -1853,6 +1963,9 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 incomplete_open_prefix_quiet=self._incomplete_open_prefix_min_quiet_seconds,
                 incomplete_prefix_min_chars=self._incomplete_prefix_min_chars,
                 prespeech_max=self._prespeech_batch_max_seconds,
+                prespeech_extend_min_rms=self._prespeech_extend_min_rms,
+                prespeech_extend_seconds=self._prespeech_extend_seconds,
+                prespeech_extend_max_times=self._prespeech_extend_max_times,
                 speech_no_text_max=self._speech_no_text_max_seconds,
                 speech_no_text_quiet=self._speech_no_text_min_quiet_seconds,
                 speech_no_text_action=self._speech_no_text_action,
@@ -1922,6 +2035,9 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 final_open_fallback_early_quiet=self._final_open_fallback_early_min_quiet_seconds,
                 final_open_fallback_early_active=self._final_open_fallback_early_min_active_seconds,
                 final_open_fallback_early_allow_empty=self._final_open_fallback_early_allow_empty,
+                wake_conditioned_buffer=self._wake_conditioned_buffer_enabled,
+                wake_conditioned_buffer_max=self._wake_conditioned_buffer_max_seconds,
+                wake_conditioned_buffer_quiet=self._wake_conditioned_buffer_min_quiet_seconds,
             )
 
             # 创建 ASR 批次（启用服务端 VAD 作为备份，不按句停止）
@@ -2293,6 +2409,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
         empty_wake_fallback_attempted = False
         final_open_fallback_attempted = False
         early_final_open_fallback_attempted = False
+        prespeech_extend_count = 0
         incomplete_prefix_defer_last_log = 0.0
         self._last_batch_error = ""
 
@@ -2796,9 +2913,34 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 and not has_speech
                 and self._prespeech_batch_max_seconds > 0
                 and self._batch_started_at > 0
-                and time.time() - self._batch_started_at >= self._prespeech_batch_max_seconds
+                and time.time() - self._batch_started_at
+                >= self._prespeech_batch_max_seconds
+                + prespeech_extend_count * self._prespeech_extend_seconds
             ):
                 elapsed = time.time() - self._batch_started_at
+                can_extend_prespeech = (
+                    self._prespeech_extend_seconds > 0
+                    and self._prespeech_extend_min_rms > 0
+                    and prespeech_extend_count < self._prespeech_extend_max_times
+                    and max_rms >= self._prespeech_extend_min_rms
+                    and (
+                        self._local_fallback_enabled
+                        and self._local_fallback_min_rms > 0
+                        and max_rms >= self._local_fallback_min_rms
+                    )
+                )
+                if can_extend_prespeech:
+                    prespeech_extend_count += 1
+                    last_audio_time = time.time()
+                    _latency_log(
+                        "asr_prespeech_extend",
+                        elapsed=round(elapsed, 3),
+                        max_rms=round(max_rms, 1),
+                        extend_seconds=round(self._prespeech_extend_seconds, 3),
+                        count=prespeech_extend_count,
+                        max_times=self._prespeech_extend_max_times,
+                    )
+                    continue
                 self._logger.info(
                     "No speech before %.1fs, rotating ASR batch (max_rms=%.1f)",
                     elapsed,
@@ -2871,6 +3013,46 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                                 speech_elapsed=round(elapsed, 3),
                             )
                             continue
+                        pending_fragment_age = (
+                            time.time() - self._pending_open_fallback_fragment_at
+                            if self._pending_open_fallback_fragment_at > 0
+                            else 0.0
+                        )
+                        should_wait_wake_buffer = (
+                            self._wake_conditioned_buffer_enabled
+                            and bool(self._pending_open_fallback_fragment)
+                            and self._wake_conditioned_buffer_max_seconds > 0
+                            and pending_fragment_age <= self._wake_conditioned_buffer_max_seconds
+                            and last_loud_age < self._wake_conditioned_buffer_min_quiet_seconds
+                        )
+                        if should_wait_wake_buffer:
+                            local_fallback_next_after = time.time() + self._local_fallback_retry_delay_seconds
+                            last_audio_time = time.time()
+                            _latency_log(
+                                "asr_wake_conditioned_buffer_wait",
+                                attempts=local_fallback_attempts,
+                                max_attempts=self._local_fallback_max_attempts,
+                                retry_delay=round(self._local_fallback_retry_delay_seconds, 3),
+                                age=round(pending_fragment_age, 3),
+                                max_age=round(self._wake_conditioned_buffer_max_seconds, 3),
+                                last_loud_age=round(last_loud_age, 3),
+                                min_quiet=round(self._wake_conditioned_buffer_min_quiet_seconds, 3),
+                                text_len=len(self._pending_open_fallback_fragment),
+                                text_preview=self._pending_open_fallback_fragment[:40],
+                                max_rms=round(max_rms, 1),
+                            )
+                            continue
+                        should_rescue_wake_buffer = (
+                            self._wake_conditioned_buffer_enabled
+                            and bool(self._pending_open_fallback_fragment)
+                            and last_loud_age >= self._wake_conditioned_buffer_min_quiet_seconds
+                        )
+                        if should_rescue_wake_buffer:
+                            if await try_final_open_text_rescue(
+                                "wake_conditioned_buffer",
+                                last_loud_age=last_loud_age,
+                            ):
+                                break
                         can_retry_unsafe = (
                             local_fallback_attempts < self._local_fallback_max_attempts
                             and (
@@ -3571,6 +3753,27 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         text_len=len(text),
                         text_preview=text[:40],
                     )
+                elif reason == "local_whisper_quiet" and rescue_model_text:
+                    rescue_open_text = _canonicalize_open_local_fallback_text(rescue_model_text)
+                    if _is_safe_open_local_fallback_text(
+                        rescue_open_text
+                    ) or _looks_like_open_local_fallback_prefix_fragment(rescue_open_text):
+                        text = rescue_open_text
+                        _latency_log(
+                            "asr_local_fallback_rescue_model_open_hint",
+                            reason=reason,
+                            model=self._local_fallback_rescue_model,
+                            text_len=len(text),
+                            text_preview=text[:40],
+                        )
+                    else:
+                        _latency_log(
+                            "asr_local_fallback_rescue_model_reject",
+                            reason=reason,
+                            model=self._local_fallback_rescue_model,
+                            text_len=len(rescue_model_text),
+                            text_preview=rescue_model_text[:40],
+                        )
                 else:
                     _latency_log(
                         "asr_local_fallback_rescue_model_reject",
@@ -3630,11 +3833,18 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     self._pending_open_fallback_fragment = ""
                     self._pending_open_fallback_fragment_at = 0.0
                     return combined_text
-            if _looks_like_open_local_fallback_prefix_fragment(open_text):
+            if _looks_like_open_local_fallback_prefix_fragment(
+                open_text
+            ) or (
+                self._wake_conditioned_buffer_enabled
+                and _looks_like_wake_conditioned_open_fragment(open_text)
+            ):
                 self._pending_open_fallback_fragment = open_text
                 self._pending_open_fallback_fragment_at = time.time()
                 _latency_log(
-                    "asr_local_fallback_open_fragment_store",
+                    "asr_local_fallback_wake_buffer_store"
+                    if _looks_like_wake_conditioned_open_fragment(open_text)
+                    else "asr_local_fallback_open_fragment_store",
                     reason=reason,
                     text_len=len(open_text),
                     text_preview=open_text[:40],

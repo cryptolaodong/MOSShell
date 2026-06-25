@@ -32,6 +32,19 @@ def _thinking_path() -> Path:
     return state_dir / "reachy_thinking_until"
 
 
+def _user_turn_path() -> Path:
+    workspace = Path(os.environ.get("MOSS_WORKSPACE", "/Users/laodong/Documents/MOSShell/.moss_ws"))
+    state_dir = workspace / "runtime" / "state"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    return state_dir / "reachy_last_user_turn_at"
+
+
+def _write_timestamp(path: Path, value: float) -> None:
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(f"{value:.6f}\n", encoding="utf-8")
+    tmp.replace(path)
+
+
 def mark_speaking_for(duration: float, *, tail: float = TAIL_SECONDS) -> float:
     """Mark robot output as active for duration + tail seconds."""
     clear_speech_pending()
@@ -42,9 +55,7 @@ def mark_speaking_for(duration: float, *, tail: float = TAIL_SECONDS) -> float:
     current = _read_until(path)
     if current is not None and current > until:
         until = current
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(f"{until:.6f}\n", encoding="utf-8")
-    tmp.replace(path)
+    _write_timestamp(path, until)
     return until
 
 
@@ -54,9 +65,7 @@ def clear_speaking() -> float:
     clear_thinking()
     until = time.time()
     path = _gate_path()
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(f"{until:.6f}\n", encoding="utf-8")
-    tmp.replace(path)
+    _write_timestamp(path, until)
     return until
 
 
@@ -72,18 +81,14 @@ def mark_speech_pending(timeout: float = PENDING_SECONDS) -> float:
     clear_thinking()
     until = time.time() + max(0.0, timeout)
     path = _pending_path()
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(f"{until:.6f}\n", encoding="utf-8")
-    tmp.replace(path)
+    _write_timestamp(path, until)
     return until
 
 
 def clear_speech_pending() -> float:
     until = time.time()
     path = _pending_path()
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(f"{until:.6f}\n", encoding="utf-8")
-    tmp.replace(path)
+    _write_timestamp(path, until)
     return until
 
 
@@ -98,19 +103,27 @@ def mark_thinking(timeout: float = THINKING_SECONDS) -> float:
     """Mark that Reachy is waiting for the next response to start."""
     until = time.time() + max(0.0, timeout)
     path = _thinking_path()
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(f"{until:.6f}\n", encoding="utf-8")
-    tmp.replace(path)
+    _write_timestamp(path, until)
     return until
 
 
 def clear_thinking() -> float:
     until = time.time()
     path = _thinking_path()
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(f"{until:.6f}\n", encoding="utf-8")
-    tmp.replace(path)
+    _write_timestamp(path, until)
     return until
+
+
+def mark_user_turn(timestamp: float | None = None) -> float:
+    """Record when a user turn was accepted into MOSS."""
+    ts = time.time() if timestamp is None else float(timestamp)
+    _write_timestamp(_user_turn_path(), ts)
+    return ts
+
+
+def latest_user_turn_at() -> float:
+    """Return the last accepted user turn timestamp, or 0 when unknown."""
+    return _read_until(_user_turn_path()) or 0.0
 
 
 def is_thinking() -> bool:
