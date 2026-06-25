@@ -42,7 +42,10 @@ xiaobai-moss/
 ├── data/reachy_mini_emotions/
 │   └── *.json, *.wav        # Reachy Mini 表情/动作资源
 ├── docs/
-│   └── GHOSTINSHELLS_REUSE_NOTES.md
+│   ├── GHOSTINSHELLS_REUSE_NOTES.md
+│   └── VOICE_BASE_CONTRACT.md
+├── xiaobai_core/
+│   └── contracts.py        # 1.0/2.0 共享语音底座 contract
 ├── .env.example             # 本地配置模板
 └── pyproject.toml
 ```
@@ -74,6 +77,18 @@ xiaobai-moss/
 4. 简单动作请求能执行，并且动作与语音大致同步。
 5. 普通问题 3-5 秒内开始输出。
 6. 出错时能看出卡在连接、LLM、TTS 还是动作。
+
+## 语音底座 / 功能插座
+
+后续能力不能绑死在小白 1.0 或小白 2.0 上。统一约定：
+
+```text
+TurnInput -> Feature/Brain -> ReplyPlan -> AudioOutput + MotionPlan
+```
+
+小白 1.0 用回合制输入适配器，小白 2.0 用 MOSS realtime 输入适配器；功能模块只依赖共享 contract。这样同一个故事、记忆、工具、人格、动作策略能力可以插到 1.0，也可以插到 2.0。
+
+详见 [docs/VOICE_BASE_CONTRACT.md](docs/VOICE_BASE_CONTRACT.md) 和 [xiaobai_core/contracts.py](xiaobai_core/contracts.py)。
 
 ## GhostInShells/moss-in-reachy-mini 的使用策略
 
