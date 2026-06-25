@@ -38,6 +38,33 @@ Conversational app for the Reachy Mini robot combining realtime voice backends a
 - Layered motion system queues primary moves (dances, emotions, goto poses, breathing) while blending speech-reactive wobble.
 - Async tool dispatch integrates robot motion and camera capture. An optional web UI (`--ui`) provides personality selection, mic control, and settings.
 
+## Xiaobai official baseline
+
+This branch is the Xiaobai 1.0 official-source baseline, derived from Pollen Robotics'
+`reachy_mini_conversation_app` under the Apache 2.0 license.
+
+It keeps the official app structure and adds a minimal Chinese `xiaobai` profile plus
+small shared contract shapes in `reachy_mini_conversation_app.xiaobai_contract`.
+The goal is to make future Xiaobai features portable between this official 1.0 runtime
+and the separate MOSS-based 2.0 runtime.
+
+Run the Xiaobai profile with:
+
+```bash
+REACHY_MINI_CUSTOM_PROFILE=xiaobai reachy-mini-conversation-app --no-camera
+```
+
+Local macOS note: if the GStreamer Python plugin crashes during startup, disable only
+the local `.venv` copy of `libgstpython.dylib`. The realtime media path does not require
+that plugin for this baseline.
+
+```bash
+ln -sf /Users/laodong/.local/share/uv/python/cpython-3.12.13-macos-aarch64-none/lib/libpython3.12.dylib \
+  .venv/lib/python3.12/site-packages/gstreamer_libs/lib/libpython3.12.dylib
+mv .venv/lib/python3.12/site-packages/gstreamer_python/lib/gstreamer-1.0/libgstpython.dylib \
+  .venv/lib/python3.12/site-packages/gstreamer_python/lib/gstreamer-1.0/libgstpython.dylib.disabled
+```
+
 ## Architecture
 
 The app follows a layered architecture connecting the user, AI services, and robot hardware:
