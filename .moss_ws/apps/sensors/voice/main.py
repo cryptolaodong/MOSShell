@@ -31,6 +31,7 @@ from ghoshell_moss_contrib.asr.async_states import (
     recent_asr_voice_activity,
 )
 from ghoshell_moss_contrib.asr.configs import ListenerConfig
+from ghoshell_moss_contrib.asr.intent_to_reply import decide_intent_to_reply
 from ghoshell_moss_contrib.asr.voice_turn_gate import (
     VoiceTurnDecision,
     VoiceTurnGate,
@@ -769,6 +770,14 @@ async def main(matrix: Matrix) -> None:
                         reason=result.commit_reason or "",
                         text_preview=text[:40],
                     )
+                    _latency_log(
+                        "intent_to_reply",
+                        action="drop",
+                        reason="robot_speaking",
+                        text_len=len(text),
+                        text_preview=text[:40],
+                        audio_max_rms=round(float(getattr(result, "audio_max_rms", 0.0) or 0.0), 1),
+                    )
                     await threaded.clear_buffer()
                     display.show_state("idle")
                     return
@@ -982,6 +991,17 @@ async def main(matrix: Matrix) -> None:
                         text_preview=text[:40],
                         audio_max_rms=round(audio_max_rms, 1),
                     )
+                    _latency_log(
+                        "intent_to_reply",
+                        action="hold",
+                        reason="prefix_greeting_wait_for_continuation",
+                        text_len=len(text),
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        gate_reason="prefix_greeting",
+                        addressed=True,
+                        active_before=False,
+                    )
                     return
                 if weak_local_fallback:
                     turn_gate.reset_idle_partial()
@@ -1055,6 +1075,26 @@ async def main(matrix: Matrix) -> None:
                             text_len=gate_decision.text_len,
                         )
                 if not gate_decision.accept:
+                    intent_decision = decide_intent_to_reply(
+                        text,
+                        gate_decision,
+                        extra_followup_keywords=active_followup_keywords,
+                        followup_min_chars=active_followup_min_chars,
+                        followup_max_chars=active_followup_max_chars,
+                    )
+                    _latency_log(
+                        "intent_to_reply",
+                        action=intent_decision.action,
+                        reason=intent_decision.reason,
+                        text_len=len(text),
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        gate_reason=intent_decision.gate_reason,
+                        addressed=intent_decision.addressed,
+                        active_before=intent_decision.active_before,
+                        background_context=intent_decision.background_context,
+                        direct_request=intent_decision.direct_request,
+                    )
                     logger.info("[VoiceInput] drop idle background ASR: text=%r", text[:80])
                     _latency_log(
                         "voice_drop_not_addressed",
@@ -1081,6 +1121,55 @@ async def main(matrix: Matrix) -> None:
                     await threaded.clear_buffer()
                     display.show_state("idle")
                     return
+                intent_decision = decide_intent_to_reply(
+                    text,
+                    gate_decision,
+                    extra_followup_keywords=active_followup_keywords,
+                    followup_min_chars=active_followup_min_chars,
+                    followup_max_chars=active_followup_max_chars,
+                )
+                _latency_log(
+                    "intent_to_reply",
+                    action=intent_decision.action,
+                    reason=intent_decision.reason,
+                    text_len=len(text),
+                    text_preview=text[:40],
+                    audio_max_rms=round(audio_max_rms, 1),
+                    gate_reason=intent_decision.gate_reason,
+                    addressed=intent_decision.addressed,
+                    active_before=intent_decision.active_before,
+                    background_context=intent_decision.background_context,
+                    direct_request=intent_decision.direct_request,
+                )
+                if not intent_decision.should_reply:
+                    logger.info("[VoiceInput] drop by intent gate: text=%r", text[:80])
+                    _latency_log(
+                        "voice_drop_not_addressed",
+                        text_len=len(text),
+                        reason=result.commit_reason or "",
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        gate_reason=gate_decision.reason,
+                        intent_reason=intent_decision.reason,
+                        addressed=gate_decision.addressed,
+                        active_before=gate_decision.active_before,
+                        active_left_seconds=gate_decision.active_left_seconds,
+                    )
+                    _latency_log(
+                        "voice_gate_drop",
+                        text_len=len(text),
+                        asr_reason=result.commit_reason or "",
+                        text_preview=text[:40],
+                        audio_max_rms=round(audio_max_rms, 1),
+                        gate_reason=gate_decision.reason,
+                        intent_reason=intent_decision.reason,
+                        addressed=gate_decision.addressed,
+                        active_before=gate_decision.active_before,
+                        active_left_seconds=gate_decision.active_left_seconds,
+                    )
+                    await threaded.clear_buffer()
+                    display.show_state("idle")
+                    return
 
                 display.show_recognized(text, result.commit_reason or "")
                 display.show_state("sending")
@@ -1094,6 +1183,8 @@ async def main(matrix: Matrix) -> None:
                         text_preview=text[:40],
                         audio_max_rms=round(audio_max_rms, 1),
                         gate_reason=gate_decision.reason,
+                        intent_action=intent_decision.action,
+                        intent_reason=intent_decision.reason,
                         addressed=gate_decision.addressed,
                         active_before=gate_decision.active_before,
                         active_left_seconds=gate_decision.active_left_seconds,
@@ -1119,6 +1210,8 @@ async def main(matrix: Matrix) -> None:
                         text_preview=text[:40],
                         audio_max_rms=round(audio_max_rms, 1),
                         gate_reason=gate_decision.reason,
+                        intent_action=intent_decision.action,
+                        intent_reason=intent_decision.reason,
                         addressed=gate_decision.addressed,
                         active_before=gate_decision.active_before,
                         active_left_seconds=gate_decision.active_left_seconds,

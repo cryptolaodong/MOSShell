@@ -797,6 +797,25 @@ def _remember_asr_rejected_text(text: str, *, reason: str, max_rms: float) -> No
     _RECENT_ASR_REJECTED_TEXT["max_rms"] = float(max_rms or 0.0)
 
 
+def _log_intent_drop_from_asr(
+    *,
+    reason: str,
+    text: str = "",
+    max_rms: float = 0.0,
+    asr_reason: str = "",
+) -> None:
+    _latency_log(
+        "intent_to_reply",
+        action="drop",
+        reason=reason,
+        asr_reason=asr_reason,
+        text_len=len(text or ""),
+        text_preview=(text or "")[:40],
+        audio_max_rms=round(float(max_rms or 0.0), 1),
+        gate_reason="asr_reject",
+    )
+
+
 def recent_asr_rejected_text() -> dict[str, float | str]:
     return dict(_RECENT_ASR_REJECTED_TEXT)
 
@@ -2856,6 +2875,11 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                                     if self._batch_started_at
                                     else 0.0,
                                 )
+                                _log_intent_drop_from_asr(
+                                    reason="local_fallback_no_safe_text",
+                                    max_rms=max_rms,
+                                    asr_reason="local_fallback_noise_drop",
+                                )
                                 await self._save_debug_batch(
                                     reason="local_fallback_no_safe_text",
                                     max_rms=max_rms,
@@ -3493,6 +3517,12 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                 return open_text
         if text and not _is_safe_local_fallback_text(text):
             _remember_asr_rejected_text(text, reason=reason, max_rms=max_rms)
+            _log_intent_drop_from_asr(
+                reason="unsafe_asr_text",
+                text=text,
+                max_rms=max_rms,
+                asr_reason=reason,
+            )
             _latency_log(
                 "asr_local_fallback_reject",
                 reason=reason,

@@ -90,6 +90,33 @@ _FAST_TURN_ACK_REQUEST_MARKERS = (
     "回答我",
     "一句话回答",
 )
+_FAST_NOISE_CONTEXT_WORDS = (
+    "打字",
+    "键盘",
+    "电视",
+    "视频",
+    "旁边",
+    "别人",
+    "其他人",
+    "有人说话",
+    "聊天",
+    "背景",
+    "杂音",
+    "噪声",
+    "噪音",
+)
+_FAST_NOISE_REQUEST_WORDS = (
+    "回答",
+    "回复",
+    "听到",
+    "应该",
+    "需要",
+    "只需要",
+    "不要",
+    "别",
+    "等我叫",
+    "叫你",
+)
 _FAST_OPINION_PATTERNS = ("怎么样", "如何", "好不好")
 _FAST_BRIEF_PATTERNS = (
     "一句话",
@@ -318,6 +345,20 @@ def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
         and any(marker in normalized for marker in _FAST_TURN_ACK_REQUEST_MARKERS)
     ):
         return "turn_ack", os.environ.get("MOSS_FAST_TURN_ACK_REPLY", "我听明白了。")
+    if (
+        len(normalized) <= 90
+        and "小白" in normalized
+        and any(word in normalized for word in _FAST_NOISE_CONTEXT_WORDS)
+        and any(word in normalized for word in _FAST_NOISE_REQUEST_WORDS)
+    ):
+        if "听到" in normalized or "听到了" in normalized:
+            return "noise_instruction", os.environ.get("MOSS_FAST_NOISE_HEARD_REPLY", "我听到了。")
+        if "等我叫" in normalized or "叫你" in normalized or "没叫" in normalized:
+            return "noise_instruction", os.environ.get(
+                "MOSS_FAST_NOISE_WAIT_REPLY",
+                "好的，没叫我我就不接话。",
+            )
+        return "noise_instruction", os.environ.get("MOSS_FAST_NOISE_ACK_REPLY", "我知道了。")
     if (
         len(normalized) <= 90
         and (

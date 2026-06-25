@@ -401,6 +401,27 @@ class TestAdapter:
         assert interruption_probe_kind == "turn_ack"
         assert interruption_probe_reply == "我听明白了。"
 
+    def test_simple_fast_reply_for_noise_management_instruction(self):
+        from ._runtime import _simple_fast_reply_with_kind
+
+        typing_kind, typing_reply = _simple_fast_reply_with_kind(
+            "小白我旁边有打字声音你只需要回答我听到了"
+        )
+        assert typing_kind == "noise_instruction"
+        assert typing_reply == "我听到了。"
+
+        tv_kind, tv_reply = _simple_fast_reply_with_kind(
+            "小白如果电视里有人说话你应该等我叫你之后再回答"
+        )
+        assert tv_kind == "noise_instruction"
+        assert tv_reply == "好的，没叫我我就不接话。"
+
+        background_kind, background_reply = _simple_fast_reply_with_kind(
+            "电视里有人说话你应该等我叫你之后再回答"
+        )
+        assert background_kind is None
+        assert background_reply is None
+
     def test_brief_voice_request_routes_to_brief_llm(self):
         from ._runtime import _brief_voice_request_kind
 
