@@ -368,6 +368,18 @@ class TestAdapter:
         assert reachy_actual_kind == "latency_probe"
         assert reachy_actual_reply == "我会等你说完，再简短回答。"
 
+        reachy_live_latency_kind, reachy_live_latency_reply = _simple_fast_reply_with_kind(
+            "小白你好我想测试一向堂俊子的理解可以言之请你跟我说我以后再简单回家"
+        )
+        assert reachy_live_latency_kind == "latency_probe"
+        assert reachy_live_latency_reply == "我会等你说完，再简短回答。"
+
+        reachy_live_latency_2_kind, reachy_live_latency_2_reply = _simple_fast_reply_with_kind(
+            "小白你好我想测试一下长去子的理解和言之请你等我说完以后再趕回答"
+        )
+        assert reachy_live_latency_2_kind == "latency_probe"
+        assert reachy_live_latency_2_reply == "我会等你说完，再简短回答。"
+
     def test_simple_fast_reply_for_turn_ack(self):
         from ._runtime import _simple_fast_reply_with_kind
 
@@ -401,6 +413,30 @@ class TestAdapter:
         assert interruption_probe_kind == "turn_ack"
         assert interruption_probe_reply == "我听明白了。"
 
+        reachy_live_pause_kind, reachy_live_pause_reply = _simple_fast_reply_with_kind(
+            "小白请不要在中间停顿的时候搶答最后只需要说我听你敗了"
+        )
+        assert reachy_live_pause_kind == "turn_ack"
+        assert reachy_live_pause_reply == "我听明白了。"
+
+        reachy_live_pause_2_kind, reachy_live_pause_2_reply = _simple_fast_reply_with_kind(
+            "小白不要在中间停盾的时候抢答了以后只需要说我以你了"
+        )
+        assert reachy_live_pause_2_kind == "turn_ack"
+        assert reachy_live_pause_2_reply == "我听明白了。"
+
+        reachy_live_wait_kind, reachy_live_wait_reply = _simple_fast_reply_with_kind(
+            "小白你好这是一个場具此事请不要想打答我结束之后再回复"
+        )
+        assert reachy_live_wait_kind == "turn_ack"
+        assert reachy_live_wait_reply == "我听明白了。"
+
+        reachy_live_wait_2_kind, reachy_live_wait_2_reply = _simple_fast_reply_with_kind(
+            "小白你好这是一个場具测试请不要搶打答我结束之后再回复"
+        )
+        assert reachy_live_wait_2_kind == "turn_ack"
+        assert reachy_live_wait_2_reply == "我听明白了。"
+
     def test_simple_fast_reply_for_noise_management_instruction(self):
         from ._runtime import _simple_fast_reply_with_kind
 
@@ -421,6 +457,21 @@ class TestAdapter:
         )
         assert background_kind is None
         assert background_reply is None
+
+    def test_simple_fast_reply_for_reachy_live_brief_color_mishear(self):
+        from ._runtime import _simple_fast_reply_with_kind
+
+        kind, reply = _simple_fast_reply_with_kind(
+            "小白你好请你移居滑回答你今天最喜欢什么颜色为什么"
+        )
+        assert kind == "brief_color"
+        assert reply == "我喜欢蓝色，因为它像天空一样安静又可靠。"
+
+        live_kind, live_reply = _simple_fast_reply_with_kind(
+            "小白你好请用一句话回答你小白你好请用一句话回答你今天最喜欢什么的色为什么"
+        )
+        assert live_kind == "brief_color"
+        assert live_reply == "我喜欢蓝色，因为它像天空一样安静又可靠。"
 
     def test_brief_voice_request_routes_to_brief_llm(self):
         from ._runtime import _brief_voice_request_kind

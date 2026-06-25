@@ -57,6 +57,12 @@ def test_safe_local_fallback_canonicalizes_noisy_ability_question() -> None:
     assert _canonicalize_safe_local_fallback_text("小白底線才能做") == "小白你现在能做什么"
     assert _is_safe_local_fallback_text("想把你現在能夠什麼")
     assert _canonicalize_safe_local_fallback_text("想把你現在能夠什麼") == "小白你现在能做什么"
+    assert _is_safe_local_fallback_text("小白你好你现在能做什么请用一句话回答")
+    assert (
+        _canonicalize_safe_local_fallback_text("小白你好你现在能做什么请用一句话回答")
+        == "小白你现在能做什么"
+    )
+    assert not _is_safe_local_fallback_text("电视里有人问现在能做什么请用一句话回答")
 
 
 def test_safe_local_fallback_rejects_likely_fragments() -> None:
@@ -184,6 +190,21 @@ def test_open_local_fallback_accepts_addressed_questions() -> None:
     assert _is_safe_open_local_fallback_text("小白你好如果聽到欠牌聲你不要接話")
     assert _is_safe_open_local_fallback_text("小白你好旁边有视频生意你听到我叫小白再回答")
     assert _is_safe_open_local_fallback_text("找你航米現代能做什麼請用一句話回答")
+    assert (
+        _canonicalize_open_local_fallback_text("小白你好如何聽到這")
+        == "小白你好如果听到键盘声你不要接话"
+    )
+    assert _is_safe_open_local_fallback_text("小白你好如何聽到這")
+    assert not _is_safe_open_local_fallback_text("如何聽到這")
+    assert _is_safe_open_local_fallback_text("角白你好請用一句話回答你今天最喜歡什麼顏色為什麼")
+    assert (
+        _canonicalize_open_local_fallback_text("角白你好請用一句話回答你今天最喜歡什麼顏色為什麼")
+        == "小白你好请用一句话回答你今天最喜欢什么颜色为什么"
+    )
+    assert _is_safe_open_local_fallback_text(
+        "走啊你好我是测试你常去子的一届和言之请你跟我说完以后再简单回答"
+    )
+    assert _canonicalize_open_local_fallback_text("角白你好") == "角白你好"
 
 
 def test_open_local_fallback_stores_addressed_test_prefix_without_replying() -> None:
@@ -206,6 +227,10 @@ def test_open_local_fallback_combines_addressed_answer_prefix_with_semantic_suff
     combined = _combine_open_local_fallback_fragments(prefix, suffix)
     assert combined.startswith("小白你好请一句话回答你")
     assert _is_safe_open_local_fallback_text(combined)
+
+    live_suffix_combined = _combine_open_local_fallback_fragments(prefix, "听话什么颜色为什么")
+    assert live_suffix_combined.startswith("小白你好请一句话回答你")
+    assert _is_safe_open_local_fallback_text(live_suffix_combined)
 
 
 def test_open_local_fallback_combines_split_turn_completion_fragments() -> None:

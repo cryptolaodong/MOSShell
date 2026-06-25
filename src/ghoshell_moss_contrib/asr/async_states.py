@@ -360,6 +360,12 @@ def _canonicalize_safe_local_fallback_text(text: str) -> str:
             for token in ("能做", "会做", "能够什么", "能干什么", "干什么")
         ):
             return "小白你现在能做什么"
+    if normalized.startswith("小白") and len(normalized) <= 24:
+        rest = normalized[2:]
+        if any(token in rest for token in ("能做什么", "会做什么", "能做", "能干什么")) and any(
+            token in rest for token in ("回答", "一句话", "简短", "简单")
+        ):
+            return "小白你现在能做什么"
     if normalized == "你现在能做什么":
         return "你现在能做什么"
     return cleaned
@@ -492,6 +498,8 @@ _OPEN_REQUEST_WAKE_PREFIXES = (
     "小摆",
     "小掰",
     "小怪",
+    "角白",
+    "走啊",
 )
 
 
@@ -564,6 +572,8 @@ def _canonicalize_open_local_fallback_text(text: str) -> str:
         return ""
     if normalized.startswith("找你航米"):
         normalized = f"小白你好你{normalized[len('找你航米'):]}"
+    if normalized.startswith(("小白你好如何听到这", "小白你好如果听到这")):
+        normalized = "小白你好如果听到键盘声你不要接话"
 
     for wake in _OPEN_REQUEST_WAKE_PREFIXES:
         if normalized.startswith(wake):
@@ -2826,6 +2836,7 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     )
                 ):
                     local_fallback_attempts += 1
+                    pending_open_before = self._pending_open_fallback_fragment
                     fallback_text = await self._try_local_fallback(
                         reason="local_whisper_quiet",
                         max_rms=max_rms,
@@ -2841,6 +2852,25 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                         )
                         break
                     if self._local_fallback_drop_unsafe:
+                        stored_open_fragment = (
+                            bool(self._pending_open_fallback_fragment)
+                            and self._pending_open_fallback_fragment != pending_open_before
+                        )
+                        if stored_open_fragment:
+                            local_fallback_next_after = time.time() + self._local_fallback_retry_delay_seconds
+                            last_audio_time = time.time()
+                            _latency_log(
+                                "asr_local_fallback_open_fragment_defer",
+                                attempts=local_fallback_attempts,
+                                max_attempts=self._local_fallback_max_attempts,
+                                retry_delay=round(self._local_fallback_retry_delay_seconds, 3),
+                                text_len=len(self._pending_open_fallback_fragment),
+                                text_preview=self._pending_open_fallback_fragment[:40],
+                                max_rms=round(max_rms, 1),
+                                last_loud_age=round(last_loud_age, 3),
+                                speech_elapsed=round(elapsed, 3),
+                            )
+                            continue
                         can_retry_unsafe = (
                             local_fallback_attempts < self._local_fallback_max_attempts
                             and (
@@ -3572,6 +3602,46 @@ class AsyncPdtListeningState(AsyncListenerState, AsyncRecognitionCallback):
                     pending=bool(self._pending_open_fallback_fragment),
                 )
                 return open_text
+        if text and reason == "local_whisper_quiet":
+            open_text = _canonicalize_open_local_fallback_text(text)
+            if _is_safe_open_local_fallback_text(open_text):
+                _latency_log(
+                    "asr_local_fallback_open_accept",
+                    reason=reason,
+                    text_len=len(open_text),
+                    text_preview=open_text[:40],
+                    model=effective_model_name,
+                )
+                return open_text
+            if self._pending_open_fallback_fragment and _looks_like_open_request_fragment(open_text):
+                combined_text = _combine_open_local_fallback_fragments(
+                    self._pending_open_fallback_fragment,
+                    open_text,
+                )
+                if combined_text and _is_safe_open_local_fallback_text(combined_text):
+                    _latency_log(
+                        "asr_local_fallback_open_fragment_merge",
+                        reason=reason,
+                        previous_preview=self._pending_open_fallback_fragment[:40],
+                        current_preview=open_text[:40],
+                        text_preview=combined_text[:60],
+                        model=effective_model_name,
+                    )
+                    self._pending_open_fallback_fragment = ""
+                    self._pending_open_fallback_fragment_at = 0.0
+                    return combined_text
+            if _looks_like_open_local_fallback_prefix_fragment(open_text):
+                self._pending_open_fallback_fragment = open_text
+                self._pending_open_fallback_fragment_at = time.time()
+                _latency_log(
+                    "asr_local_fallback_open_fragment_store",
+                    reason=reason,
+                    text_len=len(open_text),
+                    text_preview=open_text[:40],
+                    model=effective_model_name,
+                    ttl=round(self._open_fallback_fragment_ttl_seconds, 3),
+                )
+                return ""
         if text and not _is_safe_local_fallback_text(text):
             normalized_text = _normalize_local_asr_text(text)
             duration_seconds = len(flat) / sample_rate if sample_rate > 0 else 0.0

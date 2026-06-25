@@ -231,6 +231,8 @@ _FAST_TEXT_REPLACEMENTS = {
     "會": "会",
     "機": "机",
     "聽": "听",
+    "搶": "抢",
+    "敗": "败",
     "情简直": "请简短",
     "晴监督我让": "请简短回答",
     "请简直回答": "请简短回答",
@@ -257,6 +259,8 @@ _FAST_TEXT_REPLACEMENTS = {
     "一名据换": "一句话",
     "一句换": "一句话",
     "换回的": "话回答",
+    "移进往回答": "一句话回答",
+    "移居滑回答": "一句话回答",
     "进换": "一句话",
     "去换": "一句话",
     "一天自己": "今天最喜欢",
@@ -272,6 +276,12 @@ _FAST_TEXT_REPLACEMENTS = {
     "哪儿做": "需要耳朵",
     "一定躲": "一定等",
     "收完": "说完",
+    "听你败了": "听明白了",
+    "場具": "长句",
+    "此事": "测试",
+    "想打擋": "抢答",
+    "想打挡": "抢答",
+    "想打答": "抢答",
     "言直": "延迟",
     "一迷句话": "一句话",
     "一迷句": "一句",
@@ -280,6 +290,17 @@ _FAST_TEXT_REPLACEMENTS = {
     "这不成是": "这个城市",
     "緊用": "请用",
     "換": "换",
+    "堂俊子": "长句子",
+    "长去子": "长句子",
+    "言之": "延迟",
+    "跟我说我以后": "等我说完以后",
+    "趕回答": "简单回答",
+    "什么的色": "什么颜色",
+    "搶打擋": "抢答",
+    "搶打挡": "抢答",
+    "搶打答": "抢答",
+    "抢打挡": "抢答",
+    "抢打答": "抢答",
 }
 
 
@@ -337,6 +358,12 @@ def _simple_fast_reply_with_kind(text: str) -> tuple[str | None, str | None]:
         and "最后" in normalized
         and ("说一句话" in normalized or "再说一句话" in normalized)
         and any(marker in normalized for marker in ("中途", "打断", "测试"))
+    ):
+        return "turn_ack", os.environ.get("MOSS_FAST_TURN_ACK_REPLY", "我听明白了。")
+    if (
+        len(normalized) <= 90
+        and any(marker in normalized for marker in ("抢答", "插话", "中间停顿", "不要在中间"))
+        and any(marker in normalized for marker in ("只需要说", "只要说", "需要说", "最后", "之后"))
     ):
         return "turn_ack", os.environ.get("MOSS_FAST_TURN_ACK_REPLY", "我听明白了。")
     if (
