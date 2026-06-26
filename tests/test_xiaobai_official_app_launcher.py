@@ -13,6 +13,7 @@ def test_build_official_env_points_to_external_profile(monkeypatch) -> None:
     assert env["REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY"] == "/repo/xiaobai_app_pack/profiles/official_app"
     assert env["XIAOBAI_MEMORY_SIDECAR_URL"] == "http://127.0.0.1:8788"
     assert env["REALTIME_TRANSCRIPTION_LANGUAGE"] == "zh"
+    assert env["REALTIME_INTERRUPT_RESPONSE"] == "false"
     assert env["REACHY_MINI_APP_TIMEOUT_MINUTES"] == "0"
 
 
@@ -23,6 +24,15 @@ def test_build_official_env_preserves_explicit_transcription_language(monkeypatc
         sidecar_base_url="http://127.0.0.1:8788",
     )
     assert env["REALTIME_TRANSCRIPTION_LANGUAGE"] == "en"
+
+
+def test_build_official_env_preserves_explicit_interrupt_response(monkeypatch) -> None:
+    monkeypatch.setattr(launcher, "app_pack_root", lambda: launcher.Path("/repo/xiaobai_app_pack"))
+    env = launcher.build_official_env(
+        base_env={"REALTIME_INTERRUPT_RESPONSE": "true"},
+        sidecar_base_url="http://127.0.0.1:8788",
+    )
+    assert env["REALTIME_INTERRUPT_RESPONSE"] == "true"
 
 
 def test_build_commands_are_official_app_and_sidecar_only() -> None:
@@ -64,6 +74,27 @@ def test_stop_old_moss_runtime_can_fail_closed(monkeypatch) -> None:
     assert result.ok is False
     assert result.name == "old_moss_runtime"
     assert result.next_steps
+
+
+def test_find_official_app_pids_parses_pgrep_output(monkeypatch) -> None:
+    monkeypatch.setattr(launcher.os, "getpid", lambda: 123)
+
+    def fake_runner(*_args, **_kwargs):
+        return subprocess.CompletedProcess(["pgrep"], 0, stdout="123\n456\nnot-a-pid\n", stderr="")
+
+    assert launcher.find_official_app_pids(runner=fake_runner) == [456]
+
+
+def test_stop_existing_official_app_dry_run_does_not_kill(monkeypatch) -> None:
+    killed = []
+    monkeypatch.setattr(launcher, "find_official_app_pids", lambda: [456])
+    monkeypatch.setattr(launcher.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    result = launcher.stop_existing_official_app(stop=False)
+
+    assert result.ok is True
+    assert result.details["would_stop"] is True
+    assert killed == []
 
 
 def test_output_check_failure_has_next_steps(monkeypatch) -> None:
@@ -109,3 +140,4 @@ def test_dry_run_prints_env_and_does_not_start_process(monkeypatch, capsys, tmp_
     assert "would_start_official_app=uv run reachy-mini-conversation-app --no-camera --ui" in out
     assert "REACHY_MINI_CUSTOM_PROFILE=xiaobai_app_pack_r1" in out
     assert "REALTIME_TRANSCRIPTION_LANGUAGE=zh" in out
+    assert "REALTIME_INTERRUPT_RESPONSE=false" in out

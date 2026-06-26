@@ -503,6 +503,36 @@ async def test_user_speech_events_reset_idle_timer(monkeypatch: Any) -> None:
 
 
 @pytest.mark.asyncio
+async def test_user_speech_started_clears_queue_when_interrupt_enabled(monkeypatch: Any) -> None:
+    """Barge-in mode should flush pending playback when the user starts speaking."""
+    clear_queue = MagicMock()
+    monkeypatch.setattr(config, "REALTIME_INTERRUPT_RESPONSE", True)
+
+    await _run_openai_handler_with_events(
+        monkeypatch,
+        [SimpleNamespace(type="input_audio_buffer.speech_started")],
+        handler_setup=lambda handler: setattr(handler, "_clear_queue", clear_queue),
+    )
+
+    clear_queue.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_user_speech_started_keeps_queue_when_interrupt_disabled(monkeypatch: Any) -> None:
+    """Xiaobai smooth speech mode should not cut its own playback on VAD start events."""
+    clear_queue = MagicMock()
+    monkeypatch.setattr(config, "REALTIME_INTERRUPT_RESPONSE", False)
+
+    await _run_openai_handler_with_events(
+        monkeypatch,
+        [SimpleNamespace(type="input_audio_buffer.speech_started")],
+        handler_setup=lambda handler: setattr(handler, "_clear_queue", clear_queue),
+    )
+
+    clear_queue.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_empty_user_transcript_exits_listening_without_chat_message(monkeypatch: Any) -> None:
     """Blank VAD commits should not leave listening motion frozen."""
     movement_manager = MagicMock()
@@ -603,6 +633,16 @@ def test_openai_session_uses_configured_transcription_language(monkeypatch: Any)
     session = handler._get_session_config([])
 
     assert session["audio"]["input"]["transcription"]["language"] == "fr"
+
+
+def test_openai_session_uses_configured_interrupt_response(monkeypatch: Any) -> None:
+    """OpenAI realtime sessions should forward the barge-in interrupt setting."""
+    monkeypatch.setattr(config, "REALTIME_INTERRUPT_RESPONSE", False)
+    handler = OpenaiRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+
+    session = handler._get_session_config([])
+
+    assert session["audio"]["input"]["turn_detection"]["interrupt_response"] is False
 
 
 def test_copy_preserves_current_voice_override(monkeypatch: Any) -> None:

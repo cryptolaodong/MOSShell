@@ -281,6 +281,16 @@ def test_huggingface_session_uses_configured_transcription_language(monkeypatch:
     assert session["audio"]["input"]["transcription"]["language"] == "zh"
 
 
+def test_huggingface_session_uses_configured_interrupt_response(monkeypatch: Any) -> None:
+    """Hugging Face realtime sessions should forward the barge-in interrupt setting."""
+    monkeypatch.setattr(config, "REALTIME_INTERRUPT_RESPONSE", False)
+    handler = HuggingFaceRealtimeHandler(ToolDependencies(reachy_mini=MagicMock(), movement_manager=MagicMock()))
+
+    session = handler._get_session_config([])
+
+    assert session["audio"]["input"]["turn_detection"]["interrupt_response"] is False
+
+
 @pytest.mark.asyncio
 async def test_run_realtime_session_passes_allocated_session_query(monkeypatch: Any) -> None:
     """Hugging Face sessions must forward the allocated session token to the websocket connect call."""

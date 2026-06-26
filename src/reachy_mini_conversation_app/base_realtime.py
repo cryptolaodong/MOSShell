@@ -758,7 +758,7 @@ class BaseRealtimeHandler(ConversationHandler, ABC):
                         self._turn_user_done_at = None
                         self._turn_response_created_at = None
                         self._turn_first_audio_at = None
-                        if self._clear_queue:
+                        if config.REALTIME_INTERRUPT_RESPONSE and self._clear_queue:
                             self._clear_queue()
                         self.deps.movement_manager.set_listening(True)
                         logger.debug("User speech started")

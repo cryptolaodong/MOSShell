@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,7 @@ DEFAULT_APP_BASE = "http://127.0.0.1:7860"
 DEFAULT_ROBOT_BASE = "http://192.168.31.222:8000"
 DEFAULT_OLD_MOSS_SCREEN = "moss-ghost"
 DEFAULT_TRANSCRIPTION_LANGUAGE = "zh"
+DEFAULT_INTERRUPT_RESPONSE = "false"
 
 NEXT_STEPS = {
     "old_moss_running": [
@@ -34,6 +36,10 @@ NEXT_STEPS = {
     "app_not_ready": [
         "Open the app log printed by the launcher.",
         "Check the official app `/status` endpoint and backend connection.",
+    ],
+    "old_official_app_running": [
+        "Stop the existing reachy-mini-conversation-app process before starting Xiaobai.",
+        "Run `pgrep -af reachy-mini-conversation-app` to inspect leftover instances.",
     ],
     "output_check_failed": [
         "Run the output self-check again after confirming Reachy daemon is reachable.",
@@ -84,6 +90,7 @@ def build_official_env(
     env["REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY"] = str(app_pack_root() / "profiles" / "official_app")
     env["XIAOBAI_MEMORY_SIDECAR_URL"] = sidecar_base_url or sidecar_url()
     env.setdefault("REALTIME_TRANSCRIPTION_LANGUAGE", DEFAULT_TRANSCRIPTION_LANGUAGE)
+    env.setdefault("REALTIME_INTERRUPT_RESPONSE", DEFAULT_INTERRUPT_RESPONSE)
     env.setdefault("REACHY_MINI_APP_TIMEOUT_MINUTES", app_timeout_minutes)
     return env
 
@@ -232,6 +239,67 @@ def stop_old_moss_runtime(
     return CheckResult("old_moss_runtime", stopped.returncode == 0, details, NEXT_STEPS["old_moss_running"])
 
 
+def find_official_app_pids(
+    *,
+    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
+) -> list[int]:
+    found = runner(["pgrep", "-f", "reachy-mini-conversation-app"], capture_output=True, text=True, check=False)
+    if found.returncode not in (0, 1):
+        return []
+    current_pid = os.getpid()
+    pids: list[int] = []
+    for line in (found.stdout or "").splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid != current_pid:
+            pids.append(pid)
+    return pids
+
+
+def stop_existing_official_app(*, stop: bool = True, timeout: float = 3.0) -> CheckResult:
+    pids = find_official_app_pids()
+    details: dict[str, Any] = {"pids": pids, "running": bool(pids)}
+    if not pids:
+        return CheckResult("old_official_app_runtime", True, details, [])
+    if not stop:
+        details["would_stop"] = True
+        return CheckResult("old_official_app_runtime", True, details, [])
+
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        remaining = find_official_app_pids()
+        if not any(pid in remaining for pid in pids):
+            details["stopped"] = True
+            return CheckResult("old_official_app_runtime", True, details, [])
+        time.sleep(0.1)
+
+    remaining = find_official_app_pids()
+    stubborn = [pid for pid in pids if pid in remaining]
+    details["stubborn_pids"] = stubborn
+    for pid in stubborn:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    time.sleep(0.2)
+    remaining_after_kill = find_official_app_pids()
+    still_running = [pid for pid in pids if pid in remaining_after_kill]
+    details["still_running"] = still_running
+    return CheckResult(
+        "old_official_app_runtime",
+        not still_running,
+        details,
+        [] if not still_running else NEXT_STEPS["old_official_app_running"],
+    )
+
+
 def ensure_log_dir(log_dir: Path) -> Path:
     log_dir.mkdir(parents=True, exist_ok=True)
     return log_dir
@@ -270,6 +338,9 @@ def start(args: argparse.Namespace) -> int:
     old_moss = stop_old_moss_runtime(screen_name=args.old_moss_screen, stop=not args.no_stop_old_moss)
     if not old_moss.ok:
         raise LauncherError(old_moss)
+    old_official_app = stop_existing_official_app(stop=not args.dry_run)
+    if not old_official_app.ok:
+        raise LauncherError(old_official_app)
 
     env = build_official_env(
         profile=args.profile,
@@ -303,6 +374,7 @@ def start(args: argparse.Namespace) -> int:
         print(f"REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY={env['REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY']}")
         print(f"XIAOBAI_MEMORY_SIDECAR_URL={env['XIAOBAI_MEMORY_SIDECAR_URL']}")
         print(f"REALTIME_TRANSCRIPTION_LANGUAGE={env['REALTIME_TRANSCRIPTION_LANGUAGE']}")
+        print(f"REALTIME_INTERRUPT_RESPONSE={env['REALTIME_INTERRUPT_RESPONSE']}")
         return 0
 
     app_process = start_process(app_command, cwd=official_root, env=env, log_file=log_dir / "official_app.log")
@@ -331,6 +403,7 @@ def start(args: argparse.Namespace) -> int:
                 "sidecar_url": sidecar_base,
                 "log_dir": str(log_dir),
                 "old_moss": result_to_dict(old_moss),
+                "old_official_app": result_to_dict(old_official_app),
                 "ready": result_to_dict(ready),
                 "output": result_to_dict(output),
             },
@@ -359,6 +432,7 @@ def print_env(args: argparse.Namespace) -> int:
         "REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY",
         "XIAOBAI_MEMORY_SIDECAR_URL",
         "REALTIME_TRANSCRIPTION_LANGUAGE",
+        "REALTIME_INTERRUPT_RESPONSE",
     ):
         print(f"export {key}={json.dumps(env[key], ensure_ascii=False)}")
     return 0

@@ -92,7 +92,10 @@ class HuggingFaceRealtimeHandler(BaseRealtimeHandler):
                         model="gpt-4o-transcribe",
                         language=config.REALTIME_TRANSCRIPTION_LANGUAGE,
                     ),
-                    turn_detection=ServerVad(type="server_vad", interrupt_response=True),
+                    turn_detection=ServerVad(
+                        type="server_vad",
+                        interrupt_response=config.REALTIME_INTERRUPT_RESPONSE,
+                    ),
                 ),
                 output=RealtimeAudioConfigOutputParam(
                     format=_native_rate_audio_pcm(),  # type: ignore[typeddict-item]
