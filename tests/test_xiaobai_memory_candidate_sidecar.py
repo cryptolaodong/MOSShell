@@ -7,6 +7,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 
 from xiaobai_app_pack.sidecars.memory_candidate_client import request_json
+from xiaobai_app_pack.sidecars.memory_candidate_cli import main as memory_cli_main
 from xiaobai_app_pack.sidecars.memory_candidate_sidecar import MemoryStore, make_handler
 
 
@@ -93,5 +94,50 @@ def test_profile_tools_use_sidecar(tmp_path: Path, monkeypatch) -> None:
         removed = asyncio.run(Forget()(None, query="简短验收"))
         assert removed["memory_id"] == candidate_id
         assert "爸爸喜欢简短验收报告" in removed["removed"]["fact"]
+    finally:
+        server.shutdown()
+
+
+def test_memory_review_cli_lifecycle_and_redaction(tmp_path: Path, monkeypatch, capsys) -> None:
+    server, url = _serve_store(tmp_path)
+    monkeypatch.setenv("XIAOBAI_MEMORY_SIDECAR_URL", url)
+    try:
+        created = request_json(
+            "POST",
+            "/memory/candidates",
+            {
+                "fact": "爸爸的临时 token 是 sk-testsecret12345678",
+                "subject": "dad",
+                "sensitivity": "private",
+            },
+        )
+        candidate_id = created["candidate"]["id"]
+
+        assert memory_cli_main(["candidates"]) == 0
+        out = capsys.readouterr().out
+        assert candidate_id in out
+        assert "sk-testsecret" not in out
+        assert "[redacted]" in out
+
+        assert memory_cli_main(["approve", candidate_id]) == 0
+        assert "approved" in capsys.readouterr().out
+
+        assert memory_cli_main(["approved"]) == 0
+        out = capsys.readouterr().out
+        assert candidate_id in out
+        assert "sk-testsecret" not in out
+
+        assert memory_cli_main(["forget", "爸爸"]) == 0
+        assert "forgot" in capsys.readouterr().out
+
+        second = request_json("POST", "/memory/candidates", {"fact": "Eden likes space stories"})
+        second_id = second["candidate"]["id"]
+        assert memory_cli_main(["reject", second_id]) == 0
+        assert "rejected" in capsys.readouterr().out
+
+        third = request_json("POST", "/memory/candidates", {"fact": "Dad prefers short reports"})
+        third_id = third["candidate"]["id"]
+        assert memory_cli_main(["delete-candidate", third_id]) == 0
+        assert "deleted candidate" in capsys.readouterr().out
     finally:
         server.shutdown()

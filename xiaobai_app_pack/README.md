@@ -48,6 +48,18 @@ python -m xiaobai_app_pack.sidecars.memory_candidate_sidecar
 
 外部 profile 会通过 profile-local `memory_candidate` 工具创建候选记忆，通过 profile-local `forget` 工具删除已批准记忆。`remember` 仍不在工具白名单里。
 
+家长审核 CLI：
+
+```bash
+python -m xiaobai_app_pack.sidecars.memory_candidate_cli candidates
+python -m xiaobai_app_pack.sidecars.memory_candidate_cli approve <candidate_id>
+python -m xiaobai_app_pack.sidecars.memory_candidate_cli reject <candidate_id>
+python -m xiaobai_app_pack.sidecars.memory_candidate_cli approved
+python -m xiaobai_app_pack.sidecars.memory_candidate_cli forget <matching_phrase>
+```
+
+CLI 只访问 sidecar API，不接触摄像头、麦克风、原始音频、人脸或声纹数据；输出会对常见 API key / token 形态做脱敏。
+
 ## 验收
 
 1. 官方 app 全量测试通过。

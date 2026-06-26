@@ -58,5 +58,33 @@ def create_candidate(payload: dict[str, Any]) -> dict[str, Any]:
     return request_json("POST", "/memory/candidates", payload)
 
 
+def list_candidates() -> list[dict[str, Any]]:
+    data = request_json("GET", "/memory/candidates")
+    candidates = data.get("candidates", [])
+    return candidates if isinstance(candidates, list) else []
+
+
+def approve_candidate(candidate_id: str) -> dict[str, Any]:
+    return request_json("POST", f"/memory/candidates/{candidate_id}/approve")
+
+
+def reject_candidate(candidate_id: str) -> dict[str, Any]:
+    return request_json("POST", f"/memory/candidates/{candidate_id}/reject")
+
+
+def delete_candidate(candidate_id: str) -> dict[str, Any]:
+    return request_json("DELETE", f"/memory/candidates/{candidate_id}")
+
+
+def list_approved() -> list[dict[str, Any]]:
+    data = request_json("GET", "/memory/approved")
+    memories = data.get("memories", [])
+    return memories if isinstance(memories, list) else []
+
+
 def forget_approved(query: str) -> dict[str, Any]:
     return request_json("POST", "/memory/forget", {"query": query})
+
+
+def delete_memory(memory_id: str) -> dict[str, Any]:
+    return request_json("DELETE", f"/memory/{memory_id}")

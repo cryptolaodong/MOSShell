@@ -42,6 +42,7 @@ host_mapping:
     remember: disabled_by_default_for_r1_profile
     memory_candidate: profile_local_tool_posts_to_sidecar
     forget: profile_local_tool_deletes_approved_sidecar_memory
+    review_cli: xiaobai_app_pack.sidecars.memory_candidate_cli
   future_sidecar:
     api:
       - GET /health
@@ -56,6 +57,7 @@ acceptance:
   - normal_chat_does_not_write_long_term_memory
   - remember_requests_create_candidate
   - approve_reject_delete_candidate
+  - parent_review_cli_lists_candidates_and_approved_memories
   - explicit_forget_request_is_supported
   - sidecar_down_does_not_break_basic_chat_or_motion
   - candidate_requires_parent_approval
