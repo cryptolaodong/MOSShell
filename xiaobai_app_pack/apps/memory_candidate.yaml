@@ -1,0 +1,55 @@
+id: xiaobai.memory.candidate
+name: 记忆候选
+version: 0.1.0
+kind: sidecar_contract
+
+purpose: >
+  Create parent-reviewable memory candidates instead of writing long-term memory
+  automatically during normal conversation.
+
+required_capabilities:
+  - conversation
+optional_capabilities:
+  - host_memory_remember
+  - host_memory_forget
+  - parent_review_ui
+
+memory_states:
+  - candidate
+  - approved
+  - rejected
+  - deleted
+
+candidate_schema:
+  id: string
+  subject: child_or_family_member
+  fact: short_observable_fact
+  source_turn_id: string
+  confidence: low_medium_high
+  sensitivity: normal_private_sensitive
+  created_at: iso8601
+  approval_required: true
+
+rules:
+  automatic_save_to_long_term: false
+  allow_explicit_user_remember: adult_only_or_confirmed
+  child_can_say_forget_this: true
+  unknown_speaker_memory: candidate_only
+  no_diagnosis_or_labeling: true
+
+host_mapping:
+  pollen_official_app:
+    remember: disabled_by_default_for_r1_profile
+    forget: allowed_for_explicit_forget_requests
+  future_sidecar:
+    api:
+      - POST /memory/candidates
+      - POST /memory/candidates/{id}/approve
+      - POST /memory/candidates/{id}/reject
+      - DELETE /memory/{id}
+
+acceptance:
+  - normal_chat_does_not_write_long_term_memory
+  - explicit_forget_request_is_supported
+  - candidate_requires_parent_approval
+  - private_data_never_enters_git

@@ -1,0 +1,47 @@
+id: xiaobai.learning.coach
+name: 孩子学习陪伴
+version: 0.1.0
+kind: app_contract
+
+required_capabilities:
+  - conversation
+  - profile_prompt
+optional_capabilities:
+  - browser_search
+  - memory_candidate
+  - parent_report
+  - robot_motion
+
+permissions:
+  child_mode: true
+  internet: parent_whitelist
+  write_files: confirm
+  camera: disabled_by_default
+  paid_api: parent_confirm
+
+session_flow:
+  - connect: first acknowledge the child emotionally
+  - explain: teach one concept in short steps
+  - interact: ask 3 to 5 small questions
+  - encourage: correct gently and name one success
+  - summarize: produce a parent-visible short report candidate
+
+data_scopes:
+  reads:
+    - approved_memory
+    - learning_profile
+    - parent_whitelist
+  writes:
+    - memory_candidate
+    - parent_report_candidate
+
+fallback:
+  missing_browser: use_builtin_knowledge_only
+  missing_memory: avoid_personal_claims
+  missing_robot: text_or_voice_only_mode
+
+acceptance:
+  - complete_10_to_20_min_learning_session
+  - generate_parent_report_candidate
+  - create_only_pending_memory
+  - no_unapproved_internet_for_child

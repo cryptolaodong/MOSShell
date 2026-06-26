@@ -1,0 +1,57 @@
+id: xiaobai.desktop.control
+name: 爸爸电脑助手
+version: 0.1.0
+kind: sidecar_contract
+
+purpose: >
+  Let Xiaobai request desktop/Codex work through a controlled queue instead of
+  giving the robot direct unrestricted computer control.
+
+required_capabilities:
+  - conversation
+optional_capabilities:
+  - browser_search
+  - screenshot
+  - codex_trigger_queue
+  - file_draft_writer
+
+risk_levels:
+  read_only:
+    examples:
+      - search_web
+      - summarize_page
+      - list_status
+    confirmation: not_required_for_adult
+  low_risk_write:
+    examples:
+      - create_draft
+      - edit_note
+      - start_codex_task
+    confirmation: required
+  high_risk:
+    examples:
+      - delete_file
+      - send_message
+      - commit_or_push_code
+      - upload_private_data
+    confirmation: explicit_or_disabled
+
+sidecar_contract:
+  queue_item:
+    id: string
+    requested_by: speaker_id_or_unknown
+    command: string
+    risk_level: read_only_low_risk_write_high_risk
+    evidence_required: true
+    status: queued_running_done_failed_rejected
+
+rules:
+  child_requests: read_only_or_parent_confirm
+  unknown_speaker: no_write_actions
+  evidence_after_action: screenshot_link_or_file_path_or_command_summary
+
+acceptance:
+  - completes_3_to_5_read_only_tasks
+  - asks_before_writing_files
+  - never_sends_or_uploads_without_confirmation
+  - can_disable_sidecar_without_breaking_robot_chat

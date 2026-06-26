@@ -1,0 +1,47 @@
+id: pollen.official_conversation_app
+host_runtime: reachy_mini_conversation_app
+version_scope:
+  tested_branch: codex/xiaobai-1.0-official-base
+  upstream_baseline: v0.8.0
+
+extension_points:
+  profile:
+    directory: profiles/official_app/xiaobai_app_pack_r1
+    env:
+      REACHY_MINI_CUSTOM_PROFILE: xiaobai_app_pack_r1
+      REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY: ./xiaobai_app_pack/profiles/official_app
+    maps_to:
+      - ConversationHost.set_profile
+      - ConversationHost.send_prompt
+  tools:
+    source: profile tools.txt plus official built-in tools
+    allowed_in_r1:
+      - play_emotion
+      - stop_emotion
+      - idle_do_nothing
+      - move_head
+      - forget
+    intentionally_disabled_in_r1:
+      remember: use Memory Candidate sidecar before automatic long-term save
+      camera: enable later through Identity/Vision policy
+      dance: enable later as explicit entertainment mode
+  memory:
+    current_host_feature: official remember/forget memory file
+    r1_policy: explicit_forget_only_by_profile
+    next_step: memory_candidate_sidecar_before_remember
+  robot:
+    host_owned:
+      - realtime_speech
+      - media_playback
+      - motion_queue
+      - speech_reactive_wobble
+      - safe_builtin_motion_tools
+    xiaobai_owned:
+      - when_to_use_motion
+      - child_safe_style
+      - confirmation_rules
+
+rollback:
+  disable_external_profile: unset REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY
+  restore_default_profile: unset REACHY_MINI_CUSTOM_PROFILE
+  expected_result: official app returns to default profile without app pack data

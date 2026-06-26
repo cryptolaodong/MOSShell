@@ -1,0 +1,48 @@
+id: xiaobai.safety_permissions
+version: 0.1.0
+
+defaults:
+  child_mode: true
+  camera: disabled
+  face_recognition: disabled
+  speaker_id: disabled
+  long_term_memory_auto_write: disabled
+  desktop_write_actions: confirm
+  paid_api: confirm
+
+permission_levels:
+  allow:
+    - safe_chat
+    - short_learning_explanation
+    - safe_emotion_or_head_motion
+    - explicit_forget_request
+  confirm:
+    - internet_search_for_child
+    - saving_memory_candidate_about_child
+    - desktop_write_action
+    - triggering_codex_task
+    - enabling_camera
+    - registering_voiceprint
+    - registering_face
+  deny_by_default:
+    - deleting_files
+    - sending_messages
+    - uploading_private_data
+    - always_on_recording
+    - autonomous_core_code_change
+
+privacy:
+  never_commit:
+    - api_keys
+    - raw_audio
+    - raw_camera_frames
+    - face_embeddings
+    - speaker_embeddings
+    - child_private_notes
+  local_first: true
+  deletion_required: true
+
+fallback:
+  uncertain_identity: do_not_write_strong_memory
+  sidecar_down: continue_basic_conversation_only
+  host_runtime_error: rollback_to_official_default_profile
