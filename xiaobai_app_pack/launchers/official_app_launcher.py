@@ -20,6 +20,7 @@ DEFAULT_SIDECAR_PORT = 8788
 DEFAULT_APP_BASE = "http://127.0.0.1:7860"
 DEFAULT_ROBOT_BASE = "http://192.168.31.222:8000"
 DEFAULT_OLD_MOSS_SCREEN = "moss-ghost"
+DEFAULT_TRANSCRIPTION_LANGUAGE = "zh"
 
 NEXT_STEPS = {
     "old_moss_running": [
@@ -82,6 +83,7 @@ def build_official_env(
     env["REACHY_MINI_CUSTOM_PROFILE"] = profile
     env["REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY"] = str(app_pack_root() / "profiles" / "official_app")
     env["XIAOBAI_MEMORY_SIDECAR_URL"] = sidecar_base_url or sidecar_url()
+    env.setdefault("REALTIME_TRANSCRIPTION_LANGUAGE", DEFAULT_TRANSCRIPTION_LANGUAGE)
     env.setdefault("REACHY_MINI_APP_TIMEOUT_MINUTES", app_timeout_minutes)
     return env
 
@@ -300,6 +302,7 @@ def start(args: argparse.Namespace) -> int:
         print(f"REACHY_MINI_CUSTOM_PROFILE={env['REACHY_MINI_CUSTOM_PROFILE']}")
         print(f"REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY={env['REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY']}")
         print(f"XIAOBAI_MEMORY_SIDECAR_URL={env['XIAOBAI_MEMORY_SIDECAR_URL']}")
+        print(f"REALTIME_TRANSCRIPTION_LANGUAGE={env['REALTIME_TRANSCRIPTION_LANGUAGE']}")
         return 0
 
     app_process = start_process(app_command, cwd=official_root, env=env, log_file=log_dir / "official_app.log")
@@ -351,7 +354,12 @@ def check(args: argparse.Namespace) -> int:
 
 def print_env(args: argparse.Namespace) -> int:
     env = build_official_env(profile=args.profile, sidecar_base_url=args.sidecar_url)
-    for key in ("REACHY_MINI_CUSTOM_PROFILE", "REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY", "XIAOBAI_MEMORY_SIDECAR_URL"):
+    for key in (
+        "REACHY_MINI_CUSTOM_PROFILE",
+        "REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY",
+        "XIAOBAI_MEMORY_SIDECAR_URL",
+        "REALTIME_TRANSCRIPTION_LANGUAGE",
+    ):
         print(f"export {key}={json.dumps(env[key], ensure_ascii=False)}")
     return 0
 

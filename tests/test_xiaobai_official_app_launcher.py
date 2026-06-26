@@ -12,7 +12,17 @@ def test_build_official_env_points_to_external_profile(monkeypatch) -> None:
     assert env["REACHY_MINI_CUSTOM_PROFILE"] == "xiaobai_app_pack_r1"
     assert env["REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY"] == "/repo/xiaobai_app_pack/profiles/official_app"
     assert env["XIAOBAI_MEMORY_SIDECAR_URL"] == "http://127.0.0.1:8788"
+    assert env["REALTIME_TRANSCRIPTION_LANGUAGE"] == "zh"
     assert env["REACHY_MINI_APP_TIMEOUT_MINUTES"] == "0"
+
+
+def test_build_official_env_preserves_explicit_transcription_language(monkeypatch) -> None:
+    monkeypatch.setattr(launcher, "app_pack_root", lambda: launcher.Path("/repo/xiaobai_app_pack"))
+    env = launcher.build_official_env(
+        base_env={"REALTIME_TRANSCRIPTION_LANGUAGE": "en"},
+        sidecar_base_url="http://127.0.0.1:8788",
+    )
+    assert env["REALTIME_TRANSCRIPTION_LANGUAGE"] == "en"
 
 
 def test_build_commands_are_official_app_and_sidecar_only() -> None:
@@ -98,3 +108,4 @@ def test_dry_run_prints_env_and_does_not_start_process(monkeypatch, capsys, tmp_
     out = capsys.readouterr().out
     assert "would_start_official_app=uv run reachy-mini-conversation-app --no-camera --ui" in out
     assert "REACHY_MINI_CUSTOM_PROFILE=xiaobai_app_pack_r1" in out
+    assert "REALTIME_TRANSCRIPTION_LANGUAGE=zh" in out
