@@ -76,6 +76,20 @@ scripts/start_xiaobai_official_app.sh --dry-run --skip-output-check
 
 日志默认在：`~/.local/state/xiaobai_app_pack/`
 
+## 家庭 Alpha 验收
+
+```bash
+scripts/run_xiaobai_alpha_acceptance.sh
+```
+
+查看真人话术：
+
+```bash
+uv run python -m xiaobai_app_pack.acceptance.alpha_acceptance manual-script
+```
+
+验收包会自动检查 ready/status、profile tools、Reachy 输出、Memory Candidate + CLI approve/forget，并扫描 official app 日志里的短问答和动作请求证据。
+
 ## 验收
 
 1. 官方 app 全量测试通过。
