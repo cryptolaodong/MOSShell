@@ -34,7 +34,7 @@ apps:
     status: contract_ready
   - id: xiaobai.memory.candidate
     file: apps/memory_candidate.yaml
-    status: contract_ready
+    status: sidecar_minimal
   - id: xiaobai.desktop.control
     file: apps/desktop_control.yaml
     status: contract_ready

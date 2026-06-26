@@ -34,6 +34,20 @@ REACHY_MINI_EXTERNAL_PROFILES_DIRECTORY=./xiaobai_app_pack/profiles/official_app
 
 R1 不需要修改官方 app 核心代码。
 
+## Memory Candidate sidecar
+
+启动最小记忆候选 sidecar：
+
+```bash
+python -m xiaobai_app_pack.sidecars.memory_candidate_sidecar
+```
+
+默认地址：`http://127.0.0.1:8788`
+
+默认数据目录：`~/.local/share/xiaobai_app_pack/memory/`
+
+外部 profile 会通过 profile-local `memory_candidate` 工具创建候选记忆，通过 profile-local `forget` 工具删除已批准记忆。`remember` 仍不在工具白名单里。
+
 ## 验收
 
 1. 官方 app 全量测试通过。

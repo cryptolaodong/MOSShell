@@ -20,15 +20,16 @@ extension_points:
       - stop_emotion
       - idle_do_nothing
       - move_head
+      - memory_candidate
       - forget
     intentionally_disabled_in_r1:
       remember: use Memory Candidate sidecar before automatic long-term save
       camera: enable later through Identity/Vision policy
       dance: enable later as explicit entertainment mode
   memory:
-    current_host_feature: official remember/forget memory file
-    r1_policy: explicit_forget_only_by_profile
-    next_step: memory_candidate_sidecar_before_remember
+    current_host_feature: profile-local memory_candidate and forget tools call Xiaobai sidecar
+    r1_policy: candidate_before_approved_memory
+    next_step: parent_review_cli_or_ui
   robot:
     host_owned:
       - realtime_speech
