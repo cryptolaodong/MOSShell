@@ -54,6 +54,63 @@ def test_log_scan_marks_manual_pending_until_voice_and_action_seen(tmp_path: Pat
     assert result["status"] == "manual_pending"
     assert "short_qa" in result["evidence"]["manual_pending"]
     assert "action_request" in result["evidence"]["manual_pending"]
+    assert result["evidence"]["action_request_diagnosis"] == "no_user_voice_seen"
+
+
+def test_log_scan_diagnoses_microphone_not_capturing_action_request(tmp_path: Path) -> None:
+    log = tmp_path / "official_app.log"
+    log.write_text(
+        "\n".join(
+            [
+                "profile='xiaobai_app_pack_r1'",
+                "role=user_partial content=What is it?",
+                "role=assistant content=我好像没听清",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = acceptance.scan_interaction_logs(log)
+    assert result["status"] == "manual_pending"
+    assert "action_request" in result["evidence"]["manual_pending"]
+    assert result["evidence"]["action_request_diagnosis"] == "microphone_did_not_capture_action_request"
+
+
+def test_log_scan_diagnoses_llm_not_choosing_move_head(tmp_path: Path) -> None:
+    log = tmp_path / "official_app.log"
+    log.write_text(
+        "\n".join(
+            [
+                "profile='xiaobai_app_pack_r1'",
+                "role=user content=小白，请点一下头再说收到。",
+                "role=assistant content=收到",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = acceptance.scan_interaction_logs(log)
+    assert result["status"] == "fail"
+    assert result["evidence"]["manual_pending"] == []
+    assert result["evidence"]["action_request_diagnosis"] == "llm_did_not_choose_move_head"
+
+
+def test_log_scan_diagnoses_move_head_robot_failure(tmp_path: Path) -> None:
+    log = tmp_path / "official_app.log"
+    log.write_text(
+        "\n".join(
+            [
+                "profile='xiaobai_app_pack_r1'",
+                "role=user content=小白，请点一下头再说收到。",
+                "role=assistant content=收到",
+                "Tool call: move_head direction=up",
+                "move_head failed",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = acceptance.scan_interaction_logs(log)
+    assert result["status"] == "fail"
+    assert result["evidence"]["manual_pending"] == []
+    assert result["evidence"]["action_request_diagnosis"] == "tool_called_robot_motion_failed"
 
 
 def test_log_scan_passes_after_voice_and_move_head_seen(tmp_path: Path) -> None:

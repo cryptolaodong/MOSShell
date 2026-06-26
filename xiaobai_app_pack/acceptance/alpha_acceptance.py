@@ -49,11 +49,39 @@ NEXT_STEPS = {
         "Run the manual voice checks beside the robot, then rerun this acceptance command.",
         "If the log has no `role=user_partial`, check microphone routing in the official app.",
     ],
+    "action_microphone": [
+        "Stand beside Xiaobai and say exactly: `小白，请点一下头再说收到。`",
+        "Rerun this acceptance command immediately after Xiaobai responds or stays silent.",
+        "If no Chinese action phrase appears in the log, check microphone routing in the official app.",
+    ],
+    "action_llm": [
+        "The action request reached the conversation log, but `move_head` was not called.",
+        "Tighten the Xiaobai profile instruction for nod/head-move requests before changing runtime code.",
+    ],
+    "action_robot": [
+        "`move_head` was called, but the tool or robot movement layer reported a failure.",
+        "Run the R1-D output health check and inspect Reachy daemon/motor connection before retrying.",
+    ],
     "output": [
         "Check Reachy daemon/media/volume/motor mode.",
         "Run the R1-D launcher health check before retrying conversation.",
     ],
 }
+
+ACTION_REQUEST_MARKERS = (
+    "点头",
+    "点一下头",
+    "点点头",
+    "动脑袋",
+    "动动脑袋",
+    "摇头",
+    "抬头",
+    "低头",
+    "转头",
+    "nod",
+    "move your head",
+    "move head",
+)
 
 
 @dataclass
@@ -198,12 +226,52 @@ def read_log_tail(log_file: Path, max_bytes: int = 200_000) -> str:
 
 def scan_interaction_logs(log_file: Path) -> dict[str, Any]:
     text = read_log_tail(log_file)
+    user_lines = [
+        line
+        for line in text.splitlines()
+        if "role=user_partial content=" in line or "role=user content=" in line
+    ][-12:]
+    action_text_seen = any(marker.lower() in line.lower() for marker in ACTION_REQUEST_MARKERS for line in user_lines)
+    move_head_tool_seen = "Tool call: move_head" in text or "tool_name='move_head'" in text
+    move_head_tool_failed = (
+        "move_head failed" in text
+        or ("Tool 'move_head' (id=" in text and "failed" in text)
+    )
+    robot_motion_error_seen = "Failed to set robot target" in text or "Lost connection with the server" in text
+
+    if move_head_tool_seen and move_head_tool_failed:
+        action_diagnosis = "tool_called_robot_motion_failed"
+        action_next_steps = NEXT_STEPS["action_robot"]
+        action_status = "fail"
+    elif move_head_tool_seen:
+        action_diagnosis = "passed_move_head_tool_seen"
+        action_next_steps = []
+        action_status = "ok"
+    elif action_text_seen:
+        action_diagnosis = "llm_did_not_choose_move_head"
+        action_next_steps = NEXT_STEPS["action_llm"]
+        action_status = "fail"
+    elif user_lines:
+        action_diagnosis = "microphone_did_not_capture_action_request"
+        action_next_steps = NEXT_STEPS["action_microphone"]
+        action_status = "manual_pending"
+    else:
+        action_diagnosis = "no_user_voice_seen"
+        action_next_steps = NEXT_STEPS["action_microphone"]
+        action_status = "manual_pending"
+
     evidence = {
         "log_file": str(log_file),
         "has_log": bool(text),
         "assistant_reply_seen": "role=assistant content=" in text,
         "user_voice_seen": "role=user_partial content=" in text or "role=user content=" in text,
-        "move_head_tool_seen": "Tool call: move_head" in text or "tool_name='move_head'" in text,
+        "recent_user_lines": user_lines,
+        "action_request_text_seen": action_text_seen,
+        "action_request_diagnosis": action_diagnosis,
+        "action_request_status": action_status,
+        "move_head_tool_seen": move_head_tool_seen,
+        "move_head_tool_failed": move_head_tool_failed,
+        "robot_motion_error_seen": robot_motion_error_seen,
         "memory_candidate_tool_seen": "Tool call: memory_candidate" in text or "tool_name='memory_candidate'" in text,
         "xiaobai_profile_seen": "profile='xiaobai_app_pack_r1'" in text
         or "Loading tools for profile: xiaobai_app_pack_r1" in text,
@@ -211,15 +279,25 @@ def scan_interaction_logs(log_file: Path) -> dict[str, Any]:
     manual_pending = []
     if not evidence["user_voice_seen"] or not evidence["assistant_reply_seen"]:
         manual_pending.append("short_qa")
-    if not evidence["move_head_tool_seen"]:
+    if action_status == "manual_pending":
         manual_pending.append("action_request")
     # Memory candidate is already verified through direct sidecar+CLI flow, so log evidence is optional.
-    status = "ok" if not manual_pending else "manual_pending"
+    if action_status == "fail":
+        status = "fail"
+    elif manual_pending:
+        status = "manual_pending"
+    else:
+        status = "ok"
+    next_steps = []
+    if status == "manual_pending":
+        next_steps = NEXT_STEPS["logs"] + action_next_steps
+    elif status == "fail":
+        next_steps = action_next_steps
     return item(
         "interaction_log_evidence",
         status,
         {"manual_pending": manual_pending, **evidence},
-        [] if status == "ok" else NEXT_STEPS["logs"],
+        next_steps,
     )
 
 
