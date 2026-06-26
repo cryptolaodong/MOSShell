@@ -60,6 +60,22 @@ python -m xiaobai_app_pack.sidecars.memory_candidate_cli forget <matching_phrase
 
 CLI 只访问 sidecar API，不接触摄像头、麦克风、原始音频、人脸或声纹数据；输出会对常见 API key / token 形态做脱敏。
 
+## 一键启动官方 App
+
+```bash
+scripts/start_xiaobai_official_app.sh
+```
+
+它会停止旧 `moss-ghost` screen、启动 Memory Candidate sidecar、设置 external profile 环境、启动 Pollen 官方 Conversation App，并等待 `/ready`、`/status` 与 Reachy 输出健康检查。
+
+只看命令、不真实启动：
+
+```bash
+scripts/start_xiaobai_official_app.sh --dry-run --skip-output-check
+```
+
+日志默认在：`~/.local/state/xiaobai_app_pack/`
+
 ## 验收
 
 1. 官方 app 全量测试通过。
